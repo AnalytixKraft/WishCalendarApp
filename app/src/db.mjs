@@ -107,6 +107,37 @@ const MIGRATIONS = [
   `
   ALTER TABLE people ADD COLUMN kind TEXT NOT NULL DEFAULT 'birthday' CHECK (kind IN ('birthday', 'anniversary'));
   `,
+
+  // 5 — alerts: when a wish is not sent, the app tells you on WhatsApp. An
+  // alert is a delivery like the others, but its text is kept (a wish's is
+  // written from the plan each time), and it waits `pending` until WhatsApp
+  // is connected. alerted_at marks a message an alert has told about, so
+  // none is told twice. SQLite cannot change a CHECK: hence the new table.
+  `
+  CREATE TABLE deliveries_5 (
+    key          TEXT    PRIMARY KEY,
+    day          TEXT    NOT NULL,
+    kind         TEXT    NOT NULL CHECK (kind IN ('wish', 'reminder', 'test', 'alert')),
+    person_id    INTEGER,
+    person_name  TEXT,
+    chat_id      TEXT    NOT NULL,
+    chat_subject TEXT    NOT NULL DEFAULT '',
+    status       TEXT    NOT NULL CHECK (status IN ('pending', 'sending', 'sent', 'failed')),
+    attempts     INTEGER NOT NULL DEFAULT 0,
+    message_id   TEXT,
+    error        TEXT,
+    created_at   TEXT    NOT NULL DEFAULT (${NOW}),
+    updated_at   TEXT    NOT NULL DEFAULT (${NOW}),
+    text         TEXT,
+    alerted_at   TEXT
+  );
+  INSERT INTO deliveries_5 (key, day, kind, person_id, person_name, chat_id, chat_subject, status, attempts, message_id, error, created_at, updated_at)
+    SELECT key, day, kind, person_id, person_name, chat_id, chat_subject, status, attempts, message_id, error, created_at, updated_at FROM deliveries;
+  DROP TABLE deliveries;
+  ALTER TABLE deliveries_5 RENAME TO deliveries;
+  CREATE INDEX deliveries_by_day ON deliveries (day);
+  CREATE INDEX deliveries_by_update ON deliveries (updated_at);
+  `,
 ];
 
 function migrate(db) {
@@ -139,6 +170,7 @@ const person = (r) =>
         message: r.message,
         sendTime: r.send_time,
         kind: r.kind,
+        createdAt: r.created_at,
       }
     : null;
 const delivery = (r) => (r ? { ...r } : null);
@@ -191,11 +223,13 @@ export function openDb(file, { defaultTimezone = "Asia/Kolkata" } = {}) {
     /* The same occasion already on the list: same name, kind and date. */
     exists: (name, day, month, kind = "birthday") =>
       Boolean(q("SELECT 1 FROM people WHERE name = ? COLLATE NOCASE AND day = ? AND month = ? AND kind = ?").get(name, day, month, kind)),
+    /* createdAt: when they were added — now, unless a test says otherwise. */
     create: (fields) =>
       Number(
         q(
-          "INSERT INTO people (name, day, month, year, notes, active, phone, send_to, message, send_time, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        ).run(...personValues(fields)).lastInsertRowid,
+          `INSERT INTO people (name, day, month, year, notes, active, phone, send_to, message, send_time, kind, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, ${NOW}))`,
+        ).run(...personValues(fields), fields.createdAt ?? null).lastInsertRowid,
       ),
     update: (id, fields) => q(`UPDATE people SET ${PERSON_FIELDS}, updated_at = ${NOW} WHERE id = ?`).run(...personValues(fields), id),
     /* The People table's Save: number, where the wish goes, when, and the
@@ -231,6 +265,7 @@ export function openDb(file, { defaultTimezone = "Asia/Kolkata" } = {}) {
     template: DEFAULT_TEMPLATE,
     anniversary_template: DEFAULT_ANNIVERSARY_TEMPLATE,
     reminder_to: "",
+    alert_to: "self",
     my_phone: "",
     country_code: "91",
   };
@@ -248,11 +283,12 @@ export function openDb(file, { defaultTimezone = "Asia/Kolkata" } = {}) {
         template: values.template,
         anniversaryTemplate: values.anniversary_template,
         reminderTo: values.reminder_to, // '' (no reminder) | 'self' (the linked phone) | 'direct' (my number) | a group id
+        alertTo: values.alert_to, // the same choices; '' is no alerts
         myPhone: values.my_phone,
         countryCode: values.country_code,
       };
     },
-    save({ enabled, wishTime, reminderTime, timezone, daysAhead, template, anniversaryTemplate, reminderTo, myPhone, countryCode }) {
+    save({ enabled, wishTime, reminderTime, timezone, daysAhead, template, anniversaryTemplate, reminderTo, alertTo, myPhone, countryCode }) {
       const upsert = q("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value");
       const values = {
         enabled: enabled === undefined ? undefined : enabled ? "1" : "0",
@@ -263,6 +299,7 @@ export function openDb(file, { defaultTimezone = "Asia/Kolkata" } = {}) {
         template,
         anniversary_template: anniversaryTemplate,
         reminder_to: reminderTo,
+        alert_to: alertTo,
         my_phone: myPhone,
         country_code: countryCode,
       };
@@ -289,14 +326,14 @@ export function openDb(file, { defaultTimezone = "Asia/Kolkata" } = {}) {
     /* About to call the bridge: one more attempt, marked `sending` until the
      * answer is in. A row left `sending` means the app stopped mid-send. */
     /* chat_id / chat_subject: where it went — a group, or a number — and
-     * how the page names it. */
-    begin: ({ key, day, kind, person: p = null, to }, at) =>
+     * how the page names it. text is kept for an alert only (a new row). */
+    begin: ({ key, day, kind, person: p = null, to }, at, text = null) =>
       q(
-        `INSERT INTO deliveries (key, day, kind, person_id, person_name, chat_id, chat_subject, status, attempts, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'sending', 1, ?, ?)
+        `INSERT INTO deliveries (key, day, kind, person_id, person_name, chat_id, chat_subject, status, attempts, text, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'sending', 1, ?, ?, ?)
          ON CONFLICT (key) DO UPDATE SET status = 'sending', attempts = attempts + 1, error = NULL, chat_id = excluded.chat_id,
            chat_subject = excluded.chat_subject, person_name = excluded.person_name, updated_at = excluded.updated_at`,
-      ).run(key, day, kind, p?.id ?? null, p?.name ?? null, to.id, to.label, at, at),
+      ).run(key, day, kind, p?.id ?? null, p?.name ?? null, to.id, to.label, text, at, at),
     succeed: (key, messageId, at) =>
       q("UPDATE deliveries SET status = 'sent', message_id = ?, error = NULL, updated_at = ? WHERE key = ?").run(
         messageId,
@@ -311,5 +348,42 @@ export function openDb(file, { defaultTimezone = "Asia/Kolkata" } = {}) {
     prune: (beforeDay) => q("DELETE FROM deliveries WHERE day < ?").run(beforeDay).changes,
   };
 
-  return { people, chats, settings, password, deliveries, transaction, close: () => db.close() };
+  /* Alerts: messages to you about wishes that were not sent. Each is a
+   * delivery of kind 'alert' that waits, `pending`, until it can go; where
+   * it goes is decided then, from Settings. */
+  const CHECKED_THROUGH = "alerts_checked_through";
+  const alerts = {
+    /* A new alert, and the messages it tells about marked as told — both or
+     * neither. A key already used is left as it is. */
+    create: ({ key, day, text, about = [] }, at) =>
+      transaction(() => {
+        q(
+          `INSERT OR IGNORE INTO deliveries (key, day, kind, chat_id, status, attempts, text, created_at, updated_at)
+           VALUES (?, ?, 'alert', '', 'pending', 0, ?, ?, ?)`,
+        ).run(key, day, text, at, at);
+        const told = q("UPDATE deliveries SET alerted_at = ? WHERE key = ?");
+        for (const k of about) told.run(at, k);
+      }),
+    /* The alerts not sent yet that were made at `since` or later, oldest
+     * first. */
+    unsent: (since) =>
+      q("SELECT * FROM deliveries WHERE kind = 'alert' AND status <> 'sent' AND created_at >= ? ORDER BY created_at, key")
+        .all(since)
+        .map(delivery),
+    /* Alerts still waiting that were made before `before` will not go: said
+     * so on the page, instead of waiting there for good. */
+    expire: (before, at) =>
+      q("UPDATE deliveries SET status = 'failed', error = ?, updated_at = ? WHERE kind = 'alert' AND status = 'pending' AND created_at < ?").run(
+        "Dropped: it could not go out within 3 days.",
+        at,
+        before,
+      ).changes,
+    /* The last day already looked over for wishes that were not sent (a
+     * 'YYYY-MM-DD'), or null before the first look. */
+    checkedThrough: () => q("SELECT value FROM settings WHERE key = ?").get(CHECKED_THROUGH)?.value ?? null,
+    setCheckedThrough: (day) =>
+      q("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(CHECKED_THROUGH, day),
+  };
+
+  return { people, chats, settings, password, deliveries, alerts, transaction, close: () => db.close() };
 }

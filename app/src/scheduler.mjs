@@ -17,12 +17,20 @@
  *
  * WhatsApp not being connected is not a failed message: nothing is attempted
  * (and no retry is used up) until the bridge says `open`. A message that
- * WhatsApp refuses is retried every 10 minutes, at most 6 times a day. */
+ * WhatsApp refuses is retried every 10 minutes, at most 6 times a day.
+ *
+ * A wish that is not sent is told about in an alert, a WhatsApp message to
+ * where Settings says (the linked phone, unless changed): at once when
+ * WhatsApp refuses it for a reason someone has to fix, else when its last
+ * try fails; and the next morning, at the reminder time, for the wishes of a
+ * day that ended before they could go. Alerts wait for WhatsApp like any
+ * message, and go out once each. */
 
 import { BridgeError, CONNECTION_CODES, explain } from "./bridge.mjs";
 import {
   addDays,
   formatShortDate,
+  fromIsoDate,
   isBirthdayOn,
   isoDate,
   nearestBirthday,
@@ -31,7 +39,7 @@ import {
   upcomingBirthdays,
   zonedNow,
 } from "./dates.mjs";
-import { defaultTemplateFor, renderReminder, renderWish } from "./messages.mjs";
+import { defaultTemplateFor, renderMissedAlert, renderRefusedAlert, renderReminder, renderTestAlert, renderWish } from "./messages.mjs";
 import { directJid, formatPhone, phoneOfJid } from "./phone.mjs";
 
 /* A send the person asked for that cannot happen, in words for them. */
@@ -59,6 +67,14 @@ export const MAX_ATTEMPTS = 6;
  * unless the bridge restarted too. */
 const STALE_SENDING_MS = 2 * 60_000;
 const HISTORY_DAYS = 400;
+/* Refusals that trying again will not cure until someone changes something:
+ * the alert goes at the first one, not after the last try. */
+const NEEDS_YOU = new Set(["not_a_member", "admins_only", "not_on_whatsapp", "invalid_chat_id", "invalid_text"]);
+/* An alert that could not go out within this many days is dropped. */
+const ALERT_DAYS = 3;
+/* How far back the morning look over days gone by reaches, at most. */
+const REVIEW_DAYS = 7;
+const DAY_MS = 86_400_000;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 /* A short, uneven pause between messages: a burst of identical-looking posts
@@ -66,6 +82,13 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const defaultGap = () => 2_000 + Math.random() * 3_000;
 
 const wishTimeOf = (person, settings) => (parseTime(person.sendTime) !== null ? person.sendTime : settings.wishTime);
+
+/* Whether a person was added to the list after `day` — too late for that
+ * day's wish to have gone. */
+function addedAfter(person, day, timeZone) {
+  const at = Date.parse(person.createdAt);
+  return Number.isFinite(at) && isoDate(zonedNow(new Date(at), timeZone)) > isoDate(day);
+}
 
 /* Today's messages: the reminder first, then the wishes by their time. A
  * wish whose person has no usable "Send to" is still listed, with to: null,
@@ -118,6 +141,8 @@ function eligible(delivery, at, force) {
   switch (delivery.status) {
     case "sent":
       return false;
+    case "pending": // an alert not tried yet
+      return true;
     case "sending":
       return age >= STALE_SENDING_MS;
     default: // failed
@@ -176,6 +201,89 @@ export function createScheduler({ db, bridge, log, clock = () => new Date(), pau
     return { outcome: "waiting", detail: reason };
   }
 
+  /* In the morning — at the reminder time — the days gone by are looked
+   * over for wishes that were not sent: the computer was off or asleep, or
+   * WhatsApp not connected, until the day ended. What is found goes in one
+   * alert. Each day is looked over once; a new install starts from today,
+   * and so does sending turned back on (sendingTurnedOn). */
+  function reviewPastDays(settings, date, minute) {
+    const through = db.alerts.checkedThrough();
+    const yesterday = isoDate(addDays(date, -1));
+    if (!through) {
+      db.alerts.setCheckedThrough(isoDate(date));
+      return;
+    }
+    if (through >= yesterday || minute < (parseTime(settings.reminderTime) ?? 0)) return;
+    if (settings.enabled && settings.alertTo) {
+      const days = [];
+      let day = addDays(fromIsoDate(through), 1);
+      if (isoDate(day) < isoDate(addDays(date, -REVIEW_DAYS))) day = addDays(date, -REVIEW_DAYS);
+      for (; isoDate(day) <= yesterday; day = addDays(day, 1)) {
+        const items = planDay(db, settings, day, { linkedPhone })
+          .filter((job) => job.kind === "wish" && job.to && !addedAfter(job.person, day, settings.timezone))
+          .map((job) => ({ job, delivery: db.deliveries.get(job.key) }))
+          .filter(({ delivery }) => delivery?.status !== "sent" && !delivery?.alerted_at);
+        if (items.length) days.push({ date: day, items });
+      }
+      if (days.length) {
+        db.alerts.create(
+          {
+            key: `alert:missed:${yesterday}`,
+            day: isoDate(date),
+            text: renderMissedAlert({ days }),
+            about: days.flatMap((d) => d.items.filter((item) => item.delivery).map((item) => item.job.key)),
+          },
+          clock().toISOString(),
+        );
+      }
+    }
+    db.alerts.setCheckedThrough(yesterday);
+  }
+
+  /* Sending turned back on: the days it was off hold no missed wishes, so
+   * the next look back starts from today. */
+  function sendingTurnedOn() {
+    const yesterday = isoDate(addDays(today().date, -1));
+    const through = db.alerts.checkedThrough();
+    if (!through || through < yesterday) db.alerts.setCheckedThrough(yesterday);
+  }
+
+  const alertCutoff = () => new Date(clock().getTime() - ALERT_DAYS * DAY_MS).toISOString();
+
+  /* The alerts to send now: not sent yet, made in the last few days, and
+   * not waiting out a retry. A test alert is never sent again. */
+  function unsentAlerts() {
+    const at = clock();
+    return db.alerts.unsent(alertCutoff()).filter((alert) => !alert.key.startsWith("alert:test:") && eligible(alert, at, false));
+  }
+
+  /* Each alert a message of its own, to where Settings says alerts go now.
+   * → {sent, failed} */
+  async function sendAlerts(settings, alerts, afterOthers) {
+    const counts = { sent: 0, failed: 0 };
+    const to = destinationOf(settings.alertTo, settings.myPhone, db.chats.names(), linkedPhone);
+    if (!to?.id) return counts;
+    for (const [i, alert] of alerts.entries()) {
+      if (i > 0 || afterOthers) await pause(gap());
+      db.deliveries.begin({ key: alert.key, day: alert.day, kind: "alert", to }, clock().toISOString());
+      try {
+        const result = await bridge.send({ chatId: to.id, text: alert.text, key: alert.key });
+        db.deliveries.succeed(alert.key, result.message_id, clock().toISOString());
+        counts.sent++;
+        log.info({ key: alert.key, message_id: result.message_id, deduplicated: result.deduplicated }, "alert sent");
+      } catch (err) {
+        db.deliveries.fail(alert.key, err.message, clock().toISOString());
+        counts.failed++;
+        log.warn({ key: alert.key, code: err.code }, "alert not sent");
+        if (CONNECTION_CODES.has(err.code)) {
+          last.waiting = err.message;
+          break;
+        }
+      }
+    }
+    return counts;
+  }
+
   /* force: Send today's messages now — ignore the time of day and the
    *        Sending switch, and retry failed messages whatever their count.
    *        Sent ones stay sent.
@@ -190,7 +298,9 @@ export function createScheduler({ db, bridge, log, clock = () => new Date(), pau
       if (prunedFor !== isoDate(date)) {
         prunedFor = isoDate(date);
         db.deliveries.prune(isoDate(addDays(date, -HISTORY_DAYS)));
+        db.alerts.expire(alertCutoff(), clock().toISOString());
       }
+      reviewPastDays(settings, date, minute);
       if (!settings.enabled && !force) {
         last.waiting = null;
         return { outcome: "paused" };
@@ -203,8 +313,11 @@ export function createScheduler({ db, bridge, log, clock = () => new Date(), pau
             (!only || job.key === only) &&
             eligible(db.deliveries.get(job.key), at, force),
         );
+      // Alerts go while sending is on; a Retry of one message is that only.
+      const alertsOn = settings.enabled && Boolean(settings.alertTo);
+      const alertsDue = () => (alertsOn && !only ? unsentAlerts() : []);
       // Anything due at all, before asking the bridge anything.
-      if (!due(planDay(db, settings, date, { linkedPhone }), clock()).length) {
+      if (!due(planDay(db, settings, date, { linkedPhone }), clock()).length && !alertsDue().length) {
         last.waiting = null;
         return { outcome: "idle" };
       }
@@ -219,6 +332,7 @@ export function createScheduler({ db, bridge, log, clock = () => new Date(), pau
 
       let sent = 0;
       let failed = 0;
+      const refused = [];
       last.waiting = null;
       for (const [i, job] of jobs.entries()) {
         if (i > 0) await pause(gap());
@@ -232,11 +346,30 @@ export function createScheduler({ db, bridge, log, clock = () => new Date(), pau
           db.deliveries.fail(job.key, err.message, clock().toISOString());
           failed++;
           log.warn({ key: job.key, code: err.code }, "send failed");
+          const delivery = db.deliveries.get(job.key);
+          if (!delivery.alerted_at && (NEEDS_YOU.has(err.code) || delivery.attempts >= MAX_ATTEMPTS)) refused.push({ job, delivery });
           if (CONNECTION_CODES.has(err.code)) {
             last.waiting = err.message;
             break;
           }
         }
+      }
+      if (refused.length && alertsOn) {
+        db.alerts.create(
+          {
+            key: `alert:${refused[0].job.key}`,
+            day: isoDate(date),
+            text: renderRefusedAlert({ items: refused, maxAttempts: MAX_ATTEMPTS }),
+            about: refused.map((r) => r.job.key),
+          },
+          clock().toISOString(),
+        );
+      }
+      // Then the alerts — unless the connection has just failed.
+      if (!last.waiting) {
+        const alerts = await sendAlerts(settings, alertsDue(), jobs.length > 0);
+        sent += alerts.sent;
+        failed += alerts.failed;
       }
       last.send = { at: clock().toISOString(), sent, failed };
       return { outcome: failed ? "failed" : "sent", sent, failed, detail: `${sent} sent${failed ? `, ${failed} failed` : ""}` };
@@ -247,7 +380,7 @@ export function createScheduler({ db, bridge, log, clock = () => new Date(), pau
 
   /* One message, sent and logged. */
   async function deliverOne(job, text) {
-    db.deliveries.begin(job, clock().toISOString());
+    db.deliveries.begin(job, clock().toISOString(), job.kind === "alert" ? text : null);
     try {
       const result = await bridge.send({ chatId: job.to.id, text, key: job.key });
       db.deliveries.succeed(job.key, result.message_id, clock().toISOString());
@@ -296,6 +429,18 @@ export function createScheduler({ db, bridge, log, clock = () => new Date(), pau
     );
   }
 
+  /* "Send a test alert": what an alert looks like, to where alerts go (as
+   * saved). → where it went */
+  async function sendTestAlert() {
+    const settings = db.settings.get();
+    if (!settings.alertTo) throw new NotSendable("Alerts are off. Choose where they go, and save, first.");
+    await openStatus();
+    const to = destinationOf(settings.alertTo, settings.myPhone, db.chats.names(), linkedPhone);
+    if (!to?.id) throw new NotSendable("Choose where alerts go, and save, first.");
+    await deliverOne({ key: `alert:test:${clock().getTime()}`, day: isoDate(today().date), kind: "alert", person: null, to }, renderTestAlert());
+    return to;
+  }
+
   function start() {
     const tick = () => run().catch((err) => log.error({ err: err?.stack || String(err) }, "scheduler tick failed"));
     setTimeout(tick, 5_000);
@@ -306,5 +451,18 @@ export function createScheduler({ db, bridge, log, clock = () => new Date(), pau
     clearInterval(timer);
   }
 
-  return { run, sendNow, sendPreview, agenda, today, noteStatus, start, stop, last, isRunning: () => running };
+  return {
+    run,
+    sendNow,
+    sendPreview,
+    sendTestAlert,
+    sendingTurnedOn,
+    agenda,
+    today,
+    noteStatus,
+    start,
+    stop,
+    last,
+    isRunning: () => running,
+  };
 }

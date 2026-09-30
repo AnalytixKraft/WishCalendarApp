@@ -4,8 +4,9 @@ Birthday and anniversary wishes for a community, sent on WhatsApp.
 
 Keep the list in the app: 🎂 birthdays, and 💍 anniversaries (a couple's wedding day). For each one you choose where the wish goes — **a WhatsApp group, or straight to their own number** — what it says, and at what time. Every day it:
 
-- sends **you a morning reminder** — every wish the day holds (its time, where it goes, what it says) and the birthdays and anniversaries coming up — to the linked phone, your own number, or a group, and
-- sends **each wish** at its time, to where its row says.
+- sends **you a morning reminder** — every wish the day holds (its time, where it goes, what it says) and the birthdays and anniversaries coming up — to the linked phone, your own number, or a group,
+- sends **each wish** at its time, to where its row says, and
+- **tells you when a wish was not sent**, which one and why, so none is missed quietly.
 
 It runs on a computer that stays on — a Mac, directly, with nothing but Node; or any computer with Docker — and you use it in the browser at `http://localhost:3210`.
 
@@ -131,6 +132,28 @@ Coming up
 
 It goes to the linked phone, your own number, or a group (Settings → *Send my daily reminder to*); on a day with nothing to say, it is not sent.
 
+### Alerts
+
+When a wish is not sent, the app tells you on WhatsApp — on the linked phone, in its own chat, unless you choose otherwise (Settings → *Alerts*; *No one* turns them off):
+
+- **at once**, when WhatsApp refuses a wish for a reason someone has to fix: the linked number is not in the group, only admins may post there, or the number is not on WhatsApp;
+- **after the last try**, when it refuses for any other reason (it is tried 6 times, 10 minutes apart);
+- **the next morning**, at the reminder time, for the wishes of a day that ended before they could go — the computer was off or asleep, or WhatsApp was not connected, until midnight.
+
+```
+⚠️ Wish Calendar: a wish was not sent
+
+🎂 Biju Thomas → St. Mary's Youth · 08:00
+The linked WhatsApp number is not a member of this group. Add it to the group, then retry.
+It is tried again every 10 minutes, 5 more times.
+
+To send it now: Wish Calendar → Today → Retry now.
+```
+
+An alert is a WhatsApp message like the others: while WhatsApp is not connected it waits, and it goes out once it can (within 3 days). It is sent *from* the linked number — so if that is your own number, WhatsApp does not notify you of it (to WhatsApp it is a message you sent); it waits in *Message yourself*. With a spare number linked, alerts to your own number (*My number*) notify you like any message. **Send a test alert** in Settings shows you one.
+
+What no alert can say is that the computer, or WhatsApp, is down *right now*: nothing can be sent then. The Today page says so (*Messages are waiting*), and the next morning's alert lists what was missed.
+
 ### The password
 
 The first password is `ADMIN_PASSWORD` in `.env` (`setup.sh` asked for it, or made one up: `grep ADMIN_PASSWORD .env`). Change it in **Settings → Password** — that needs the current one, and signs out every other browser. The new one is kept as a salted scrypt hash in the app's database, never as the password itself.
@@ -148,7 +171,7 @@ That removes the password set in Settings, so `ADMIN_PASSWORD` from `.env` works
 - **On a Mac, directly**: launchd starts both parts when you sign in and restarts them if they stop — nothing to set.
 - **In Docker**: the containers restart on their own (`restart: unless-stopped`) — as long as Docker itself starts. In Docker Desktop: **Settings → General → Start Docker Desktop when you sign in**.
 - A sleeping Mac runs nothing. Stop it sleeping: **System Settings → Battery (or Energy) → Prevent automatic sleeping when the display is off**, on power adapter — and on a MacBook, keep the lid open.
-- If the computer is off or asleep at a message's time, it goes out as soon as the computer is back — later that day, never twice, and never on a later day.
+- If the computer is off or asleep at a message's time, it goes out as soon as the computer is back — later that day, never twice, and never on a later day. A wish whose day ended first is named in the next morning's [alert](#alerts).
 - **Open WhatsApp on the linked phone at least every two weeks.** WhatsApp unlinks devices whose phone has been offline for about 14 days; Settings → WhatsApp then asks you to link it again.
 
 ## Reach it from anywhere
@@ -203,7 +226,7 @@ To update to a newer version: `git pull`, then `bash scripts/native/install.sh` 
 
 ### When something is not sent
 
-The Today page lists each of the day's messages and where it stands; a message WhatsApp refused says why, and *Retry now* tries again. The app also retries on its own every 10 minutes, up to 6 times a day.
+The Today page lists each of the day's messages and where it stands; a message WhatsApp refused says why, and *Retry now* tries again. The app also retries on its own every 10 minutes, up to 6 times a day, and sends you an [alert](#alerts) for a wish that does not go.
 
 | The page says | Do this |
 |---|---|

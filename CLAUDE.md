@@ -11,7 +11,7 @@ So, against a running app or bridge, an agent never:
 
 - calls the bridge's `POST /send`;
 - presses **Send today's messages now**, **Retry now**, **Send me a preview**,
-  **Send a test message**, or any other button that sends;
+  **Send a test alert**, or any other button that sends;
 - turns **Send messages** on in Settings;
 - does anything else that makes WhatsApp deliver a message.
 

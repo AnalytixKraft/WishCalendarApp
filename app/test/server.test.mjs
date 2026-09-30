@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
+import { addDays, isoDate, zonedNow } from "../src/dates.mjs";
 import { openDb } from "../src/db.mjs";
 import { silentLog } from "../src/log.mjs";
 import { createScheduler } from "../src/scheduler.mjs";
@@ -296,4 +297,47 @@ test("without its secrets the app serves only the setup page", async () => {
   } finally {
     bare.close();
   }
+});
+
+test("Settings: where alerts go, a test alert that says why it did not go, and alerts on the Today page", async () => {
+  const cookie = await signIn();
+  const flashOf = (res) => JSON.parse(Buffer.from(/bdr_flash=([^;]+)/.exec(res.headers.getSetCookie().find((c) => c.startsWith("bdr_flash=")))[1], "base64url").toString()).text;
+  const base = { wishTime: "08:00", reminderTime: "07:00", timezone: "Asia/Kolkata", daysAhead: "1", countryCode: "91", template: "", reminderTo: "", myPhone: "" };
+
+  const page = await (await get("/settings", cookie)).text();
+  assert.match(page, /<fieldset class="settings-group" id="alerts">/);
+  assert.match(page, /<select name="alertTo"[^>]*><option value=""[^>]*>No one — no alerts<\/option><option value="self"/);
+  assert.match(page, /<button type="submit" form="test-alert"[^>]*data-confirm="Send a test alert now/);
+  assert.match(page, /<form method="post" action="\/settings\/test-alert" id="test-alert" hidden><\/form>/);
+
+  // Saved from a page opened before alerts existed: they stay as they were.
+  db.settings.save({ alertTo: "self" });
+  assert.equal((await post("/settings", base, { cookie })).status, 303);
+  assert.equal(db.settings.get().alertTo, "self");
+
+  const refused = await post("/settings", { ...base, alertTo: "direct" }, { cookie });
+  assert.equal(refused.status, 422);
+  assert.match(await refused.text(), /Add your WhatsApp number first/);
+
+  // Sending off, then on: days it was off are not looked back over.
+  assert.equal((await post("/settings", { ...base, alertTo: "self" }, { cookie })).status, 303);
+  db.alerts.setCheckedThrough("2026-01-01");
+  assert.equal((await post("/settings", { ...base, alertTo: "self", enabled: "1" }, { cookie })).status, 303);
+  const yesterday = isoDate(addDays(zonedNow(new Date(), "Asia/Kolkata"), -1));
+  assert.equal(db.alerts.checkedThrough(), yesterday);
+  assert.equal(db.settings.get().alertTo, "self");
+
+  // WhatsApp is not linked in these tests: the test alert is not sent, and says why.
+  const test = await post("/settings/test-alert", {}, { cookie });
+  assert.equal(test.status, 303);
+  assert.equal(test.headers.get("location"), "/settings");
+  assert.match(flashOf(test), /^The test alert was not sent: WhatsApp is not connected/);
+
+  db.alerts.create({ key: "alert:missed:2026-01-02", day: "2026-01-03", text: "⚠️ *Wish Calendar: a wish was not sent on Fri 2 Jan*" }, new Date().toISOString());
+  const today = await (await get("/", cookie)).text();
+  assert.match(today, /alerts to the linked phone/);
+  assert.match(today, /<td>Alert: a wish was not sent on Fri 2 Jan<\/td>\s*<td>—<\/td>\s*<td><span class="tick tick--due" aria-hidden="true">◷<\/span> Waiting to be sent<\/td>/);
+
+  assert.equal((await post("/settings", { ...base, alertTo: "" }, { cookie })).status, 303);
+  assert.match(await (await get("/", cookie)).text(), /Paused — nothing goes out on its own/);
 });

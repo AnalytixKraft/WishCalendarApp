@@ -60,6 +60,12 @@ export function zonedNow(at, timeZone) {
 
 export const isoDate = ({ year, month, day }) => `${year}-${pad(month)}-${pad(day)}`;
 
+/* "2026-09-30" → {year, month, day}: isoDate the other way. */
+export function fromIsoDate(value) {
+  const [year, month, day] = value.split("-").map(Number);
+  return { year, month, day };
+}
+
 export function addDays({ year, month, day }, n) {
   const d = new Date(Date.UTC(year, month - 1, day + n));
   return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate() };
