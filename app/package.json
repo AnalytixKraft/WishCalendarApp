@@ -1,0 +1,19 @@
+{
+  "name": "birthday-reminder-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Birthday wishes and reminders over WhatsApp, for a small community. See ../README.md.",
+  "license": "MIT",
+  "type": "module",
+  "main": "src/main.mjs",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/main.mjs",
+    "test": "node --disable-warning=ExperimentalWarning --test"
+  },
+  "dependencies": {
+    "uqr": "0.1.3"
+  }
+}

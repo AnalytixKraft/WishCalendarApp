@@ -1,0 +1,16 @@
+{
+  "name": "birthday-reminder-whatsapp-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Posts text into WhatsApp groups through a linked device, for the birthday reminder app. See README.md.",
+  "license": "MIT",
+  "type": "module",
+  "main": "src/main.mjs",
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "7.0.0-rc14",
+    "pino": "9.14.0"
+  }
+}

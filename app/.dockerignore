@@ -1,0 +1,8 @@
+# An allowlist, like the bridge's: the manifest, the lockfile, the code and
+# the browser files. Never a host-side node_modules, never the tests, never a
+# local database.
+*
+!package.json
+!package-lock.json
+!src/
+!public/

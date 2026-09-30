@@ -1,0 +1,8 @@
+# An allowlist: the image needs the manifest, the lockfile and src/, nothing
+# else. Above all never a host-side node_modules — installed on a Mac it holds
+# darwin binaries and dev dependencies, and `npm ci` in the image must be the
+# only source of what ships.
+*
+!package.json
+!package-lock.json
+!src/
