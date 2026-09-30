@@ -36,9 +36,9 @@ import makeWASocket, {
 } from "@whiskeysockets/baileys";
 import { BridgeError, TtlCache, baileysLog, log, withTimeout } from "./util.mjs";
 
-/* The `whatsapp_auth` volume. auth/ is the linked-device session — a live
- * credential for the WhatsApp account. */
-const AUTH_DIR = "/data/auth";
+/* auth/ under DATA_DIR — the `whatsapp_auth` volume in Docker — is the
+ * linked-device session: a live credential for the WhatsApp account. */
+const AUTH_DIR = join(process.env.DATA_DIR || "/data", "auth");
 const CREDS = join(AUTH_DIR, "creds.json");
 const CREDS_BACKUP = join(AUTH_DIR, "creds.json.bak");
 

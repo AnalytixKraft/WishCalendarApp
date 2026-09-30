@@ -7,7 +7,7 @@ Keep the list in the app: 🎂 birthdays, and 💍 anniversaries (a couple's wed
 - sends **you a morning reminder** — every wish the day holds (its time, where it goes, what it says) and the birthdays and anniversaries coming up — to the linked phone, your own number, or a group, and
 - sends **each wish** at its time, to where its row says.
 
-It runs on a computer that stays on (a Mac, a PC, a small server) with Docker, and you use it in the browser at `http://localhost:3210`.
+It runs on a computer that stays on — a Mac, directly, with nothing but Node; or any computer with Docker — and you use it in the browser at `http://localhost:3210`.
 
 > [!WARNING]
 > **Link a spare WhatsApp number if you can, not your business one.** The app sends through WhatsApp Web as a *linked device* — an unofficial client, against WhatsApp's Terms of Service. WhatsApp can ban a number that uses one, with no warning, and the ban takes the whole account. A few messages a day is about as low-risk as this gets; it is not zero — and messages straight to people's numbers draw more attention than posts in groups.
@@ -21,13 +21,12 @@ It runs on a computer that stays on (a Mac, a PC, a small server) with Docker, a
                        SQLite database    and to people's numbers
 ```
 
-- **`app/`** — the pages, the database (people, settings, what was sent) and the clock that sends each day's messages. Node 24, no framework, SQLite built in.
-- **`whatsapp/`** — the bridge: holds the WhatsApp session and does one thing with it — send text to a group it is in, or to a person's number. It is not reachable from outside Docker. It only messages numbers that are on WhatsApp, at most 30 direct messages an hour, and ignores messages from strangers. See [`whatsapp/README.md`](whatsapp/README.md).
-- **`cloudflared`** (optional, off) — a Cloudflare tunnel to the app's pages, and only to them. See [Reach it from anywhere](#reach-it-from-anywhere).
+- **`app/`** — the pages, the database (people, settings, what was sent — one SQLite file) and the clock that sends each day's messages. Node 24, no framework, SQLite built in.
+- **`whatsapp/`** — the bridge: holds the WhatsApp session and does one thing with it — send text to a group it is in, or to a person's number. Only this computer (or, in Docker, only the app) can reach it, and only with the token. It only messages numbers that are on WhatsApp, at most 30 direct messages an hour, and ignores messages from strangers. See [`whatsapp/README.md`](whatsapp/README.md).
+
+Two ways to run the pair: **on a Mac, directly** — two small Node programs that macOS's launchd starts when you sign in and restarts if they stop — or **in Docker**, on any computer (plus an optional Cloudflare tunnel; see [Reach it from anywhere](#reach-it-from-anywhere)).
 
 ## Set it up
-
-You need [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Mac or Windows) or Docker Engine (Linux), and git.
 
 ```bash
 git clone https://github.com/AnalytixKraft/WishCalendarApp.git
@@ -41,11 +40,23 @@ cd WishCalendarApp
 bash scripts/setup.sh
 ```
 
-`setup.sh` creates `.env` and fills in the secrets. Run in a terminal, it asks you to choose the app's password (or makes one up; see it with `grep ADMIN_PASSWORD .env`). Then start it:
+`setup.sh` creates `.env` and fills in the secrets. Run in a terminal, it asks you to choose the app's password (or makes one up; see it with `grep ADMIN_PASSWORD .env`). Then start it, one of two ways.
+
+**On a Mac, without Docker** — needs Node 22.13 or newer (fnm, nvm or Homebrew; the newest one found is used):
+
+```bash
+bash scripts/native/install.sh
+```
+
+That installs the Node packages and two launchd agents — the app and the WhatsApp bridge — that start when you sign in and start again if they ever stop. Data lives in `~/Library/Application Support/WishCalendar`, logs in `~/Library/Logs/WishCalendar`. Both listen on 127.0.0.1 only. After `git pull`, run it again. `scripts/native/status.sh` says how it is; `scripts/native/uninstall.sh` stops it and keeps the data.
+
+**In Docker** — any computer with [Docker Desktop](https://www.docker.com/products/docker-desktop/) or Docker Engine:
 
 ```bash
 docker compose up -d --build
 ```
+
+Moving from Docker to the Mac version? `bash scripts/native/migrate-from-docker.sh` stops the Docker containers and brings the database and the WhatsApp link across — no QR to scan again — then run `install.sh`. Never run the two side by side: two bridges on one WhatsApp link take it from each other.
 
 Open <http://localhost:3210>, sign in, and follow **Getting started** on the Today page:
 
@@ -134,8 +145,9 @@ That removes the password set in Settings, so `ADMIN_PASSWORD` from `.env` works
 
 ## Keep it running
 
-- The containers restart on their own (`restart: unless-stopped`), including after a reboot — as long as Docker itself starts. In Docker Desktop: **Settings → General → Start Docker Desktop when you sign in**.
-- On a Mac, stop it sleeping: **System Settings → Battery (or Energy) → Prevent automatic sleeping when the display is off**, on power adapter.
+- **On a Mac, directly**: launchd starts both parts when you sign in and restarts them if they stop — nothing to set.
+- **In Docker**: the containers restart on their own (`restart: unless-stopped`) — as long as Docker itself starts. In Docker Desktop: **Settings → General → Start Docker Desktop when you sign in**.
+- A sleeping Mac runs nothing. Stop it sleeping: **System Settings → Battery (or Energy) → Prevent automatic sleeping when the display is off**, on power adapter — and on a MacBook, keep the lid open.
 - If the computer is off or asleep at a message's time, it goes out as soon as the computer is back — later that day, never twice, and never on a later day.
 - **Open WhatsApp on the linked phone at least every two weeks.** WhatsApp unlinks devices whose phone has been offline for about 14 days; Settings → WhatsApp then asks you to link it again.
 
@@ -151,9 +163,21 @@ The app listens on `127.0.0.1` only. To use it from your phone or share it with 
 docker compose --profile tunnel up -d
 ```
 
-Without a token, `cloudflared` cannot start. The tunnel reaches the app's pages only, never the bridge. The pages need the password, and failed sign-ins are throttled; for more, put a Cloudflare Access policy in front of the hostname.
+Without a token, `cloudflared` cannot start. The tunnel reaches the app's pages only, never the bridge. (Running on the Mac without Docker, run `cloudflared` itself and point the hostname at `http://localhost:3210`.) The pages need the password, and failed sign-ins are throttled; for more, put a Cloudflare Access policy in front of the hostname.
 
 ## Day to day
+
+On a Mac, without Docker:
+
+```bash
+bash scripts/native/status.sh                  # running? WhatsApp connected?
+```
+
+```bash
+tail -n 50 ~/Library/Logs/WishCalendar/app.log # what was sent, and what failed
+```
+
+In Docker:
 
 ```bash
 docker compose ps                   # both should say (healthy)
@@ -162,6 +186,8 @@ docker compose ps                   # both should say (healthy)
 ```bash
 docker compose logs --tail 50 app   # what was sent, and what failed
 ```
+
+Either way — the scripts find where it runs:
 
 ```bash
 bash scripts/backup.sh              # the database, into backups/
@@ -173,11 +199,7 @@ bash scripts/restore.sh backups/birthdays-2026-09-30-120000.db
 
 A backup holds people, settings and the record of what was sent. It does not hold the WhatsApp link — after restoring on a new computer, link the phone again.
 
-To update to a newer version:
-
-```bash
-git pull && docker compose up -d --build
-```
+To update to a newer version: `git pull`, then `bash scripts/native/install.sh` (Mac) or `docker compose up -d --build` (Docker).
 
 ### When something is not sent
 
@@ -191,8 +213,8 @@ The Today page lists each of the day's messages and where it stands; a message W
 | Not a member of this group | Add the linked number to the group on WhatsApp, then *Retry now* |
 | Only admins can send messages | Make the linked number a group admin, then *Retry now* |
 | Too many direct messages this hour | Nothing — the rest go out on the next tries |
-| The WhatsApp bridge is not answering | `docker compose ps`, then `docker compose up -d` |
-| The app and the bridge hold different tokens | `docker compose up -d` (not `restart`), so both read `.env` again |
+| The WhatsApp bridge is not answering | Mac: `bash scripts/native/status.sh`, and its log in `~/Library/Logs/WishCalendar`. Docker: `docker compose ps`, then `docker compose up -d` |
+| The app and the bridge hold different tokens | Mac: `bash scripts/native/install.sh`. Docker: `docker compose up -d` (not `restart`) — so both read `.env` again |
 | WhatsApp refused this number — possibly banned | Link a different number |
 
 ## Development

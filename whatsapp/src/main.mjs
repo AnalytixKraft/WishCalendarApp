@@ -1,21 +1,26 @@
 /* Entry point. Decides once, at start, whether this bridge may talk to
  * WhatsApp at all, then serves the API on :3000.
  *
- * Environment (docker-compose.yml, service `whatsapp`):
+ * Environment (docker-compose.yml, service `whatsapp`; or, without Docker,
+ * scripts/native/run.sh):
  *   BRIDGE_TOKEN   the shared secret the app sends as `Authorization: Bearer`.
  *                  From WHATSAPP_BRIDGE_TOKEN in .env. Missing or short → the
  *                  bridge runs `unconfigured` (below) rather than failing.
- * Everything else is fixed on purpose: the port (nothing publishes it), the
- * data directory (/data, the whatsapp_auth volume).
+ *   DATA_DIR       where the session lives (auth/ under it). /data in Docker,
+ *                  the whatsapp_auth volume.
+ *   HOST, PORT     where to listen. 0.0.0.0:3000 in Docker, where the compose
+ *                  network is the fence; 127.0.0.1 without Docker, so only
+ *                  this computer can reach it.
  */
 
 import { createApi } from "./api.mjs";
 import { log } from "./util.mjs";
 
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
+const HOST = process.env.HOST || "0.0.0.0";
 const MIN_TOKEN_LENGTH = 32;
 
-// Everything written under /data is a live credential for a WhatsApp
+// Everything written under DATA_DIR is a live credential for a WhatsApp
 // account: owner-only, whatever mode a library asks for.
 process.umask(0o077);
 
@@ -41,8 +46,9 @@ if (token.length < MIN_TOKEN_LENGTH) {
     `BRIDGE_TOKEN is ${token ? `only ${token.length} characters (at least ${MIN_TOKEN_LENGTH} required)` : "not set"}, ` +
       "so this bridge will NOT connect to WhatsApp, and answers every call except /healthz with " +
       "503 bridge_token_not_configured. From the repo directory: `bash scripts/setup.sh` writes " +
-      "WHATSAPP_BRIDGE_TOKEN into .env (it keeps any value that is already long enough), then " +
-      "`docker compose up -d` recreates the app and the bridge with it (not `restart`, which keeps the old environment).",
+      "WHATSAPP_BRIDGE_TOKEN into .env (it keeps any value that is already long enough); then start " +
+      "the app and the bridge again so both read it — `bash scripts/native/install.sh` without Docker, " +
+      "`docker compose up -d` with it (not `restart`, which keeps the old environment).",
   );
 } else {
   // Loaded only now: an unconfigured bridge never so much as loads the
@@ -52,8 +58,8 @@ if (token.length < MIN_TOKEN_LENGTH) {
 }
 
 const server = createApi({ token, session });
-server.listen(PORT, "0.0.0.0", () => {
-  log.info({ port: PORT, state: session ? session.status().state : "unconfigured" }, "listening");
+server.listen(PORT, HOST, () => {
+  log.info({ host: HOST, port: PORT, state: session ? session.status().state : "unconfigured" }, "listening");
 });
 
 for (const signal of ["SIGTERM", "SIGINT"]) {
@@ -61,7 +67,8 @@ for (const signal of ["SIGTERM", "SIGINT"]) {
     log.info({ signal }, "stopping");
     server.close();
     // Closes the socket and flushes credentials; never a logout — a restart
-    // must come back linked. Docker's 10 s grace period is the upper bound.
+    // must come back linked. Docker's 10 s grace period (launchd's: 20 s) is
+    // the upper bound.
     await session?.stop();
     process.exit(0);
   });

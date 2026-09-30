@@ -11,14 +11,15 @@
 # The page itself offers no reset: whoever can reach it cannot use one.
 
 set -euo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+cd "$ROOT"
 
-docker compose exec -T app node --disable-warning=ExperimentalWarning -e '
+app_node '
   const { DatabaseSync } = require("node:sqlite");
-  const db = new DatabaseSync("/data/birthdays.db");
+  const db = new DatabaseSync(process.env.DATA_DIR + "/birthdays.db");
   const { changes } = db.prepare("DELETE FROM settings WHERE key = ?").run("password_hash");
   console.log(changes
-    ? "reset: the password set in Settings is removed, and everyone is signed out."
-    : "reset: no password was set in Settings — the one in .env already applies.");
+    ? "reset-password: the password set in Settings is removed, and everyone is signed out."
+    : "reset-password: no password was set in Settings — the one in .env already applies.");
 '
-echo "reset: sign in with ADMIN_PASSWORD from .env — see it with: grep ADMIN_PASSWORD .env"
+say "sign in with ADMIN_PASSWORD from .env — see it with: grep ADMIN_PASSWORD .env"
