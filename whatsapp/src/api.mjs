@@ -13,16 +13,20 @@
  *   POST /pair      start pairing, if idle
  *   POST /logout    unlink and wipe the session
  *   GET  /groups    the groups the linked number is in
- *   POST /send      post text into ONE group — never to a person
+ *   POST /send      post text into ONE chat: a group, or a phone number
  */
 
 import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import { BridgeError, log } from "./util.mjs";
 
-/* Groups only. A person's JID (…@s.whatsapp.net, …@lid) can never match, so
- * whatever holds the token cannot use this bridge to message a person. */
+/* Where /send may post: a group, or a person by phone number (country code
+ * first, 8 to 15 digits, as E.164 allows). A LID, a broadcast list, a
+ * channel or a status can never match. Direct messages carry more ban risk
+ * than group posts, so session.mjs checks the number is on WhatsApp and caps
+ * how many go out an hour. */
 const GROUP_JID = /^\d+(-\d+)?@g\.us$/;
+const DIRECT_JID = /^[1-9]\d{7,14}@s\.whatsapp\.net$/;
 /* In characters as a person counts them — code points — not JavaScript's
  * .length, which counts UTF-16 units and so counts every emoji twice. A
  * birthday wish is mostly emoji by weight; counted in units, a message well
@@ -103,7 +107,7 @@ function withinCodePoints(s, max) {
  * request gets its 400 whatever state WhatsApp is in. */
 function parseSend(body) {
   const { chat_id: chatId, text, idempotency_key: key } = body;
-  if (typeof chatId !== "string" || !GROUP_JID.test(chatId)) {
+  if (typeof chatId !== "string" || !(GROUP_JID.test(chatId) || DIRECT_JID.test(chatId))) {
     throw new BridgeError(400, "invalid_chat_id");
   }
   if (typeof text !== "string" || text.trim() === "" || !withinCodePoints(text, MAX_TEXT)) {

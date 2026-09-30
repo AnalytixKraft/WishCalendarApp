@@ -32,11 +32,15 @@ export function explain(code, state, detail) {
     case "unauthorized":
       return "The app and the WhatsApp bridge hold different tokens. Run docker compose up -d so both read WHATSAPP_BRIDGE_TOKEN from .env again.";
     case "not_connected":
-      return `WhatsApp is not connected (${STATE_LABELS[state] || state || "unknown state"}). Open the WhatsApp page to link a phone.`;
+      return `WhatsApp is not connected (${STATE_LABELS[state] || state || "unknown state"}). Link a phone in Settings → WhatsApp.`;
     case "not_a_member":
       return "The linked WhatsApp number is not a member of this group. Add it to the group, then retry.";
     case "admins_only":
       return "Only admins can send messages in this group. Make the linked number an admin, then retry.";
+    case "not_on_whatsapp":
+      return "That number is not on WhatsApp. Check it on the People page — with the country code.";
+    case "rate_limited":
+      return `Too many direct messages this hour (${detail || "the bridge's limit"}), to keep the number from being flagged as spam. The rest go out on the next tries.`;
     case "groups_failed":
       return `WhatsApp did not send the list of groups${detail ? ` (${detail})` : ""}. Try again in a minute.`;
     case "send_failed":
@@ -44,20 +48,22 @@ export function explain(code, state, detail) {
     case "invalid_text":
       return "The message is empty or longer than 20,000 characters.";
     case "invalid_chat_id":
-      return "That is not a WhatsApp group.";
+      return "That is not a WhatsApp group or phone number.";
     default:
       return `The WhatsApp bridge answered "${code}"${detail ? `: ${detail}` : "."}`;
   }
 }
 
-/* Codes that are about the connection, not about one message: retrying the
- * next message right away would only fail the same way. */
+/* Codes that are about the connection (or the hour's allowance), not about
+ * one message: trying the next message right away would only fail the same
+ * way. */
 export const CONNECTION_CODES = new Set([
   "unreachable",
   "app_token_missing",
   "bridge_token_not_configured",
   "unauthorized",
   "not_connected",
+  "rate_limited",
 ]);
 
 export function createBridge({ url, token, fetchImpl = globalThis.fetch }) {

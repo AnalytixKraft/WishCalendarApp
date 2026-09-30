@@ -8,12 +8,13 @@ import { createServer } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { renderSVG } from "uqr";
-import { COOKIE, MAX_AGE_S, createAuth, createThrottle } from "./auth.mjs";
+import { COOKIE, MAX_AGE_S, MAX_PASSWORD, MIN_PASSWORD, createAuth, createThrottle } from "./auth.mjs";
 import { parsePeople } from "./csv.mjs";
 import {
+  MONTHS,
   ageOn,
   daysInMonth,
-  formatDayMonth,
+  isBirthdayOn,
   isValidDayMonth,
   isValidTimeZone,
   nextBirthday,
@@ -35,7 +36,9 @@ import {
   sendJson,
   serializeCookie,
 } from "./http.mjs";
-import { DEFAULT_TEMPLATE, MAX_TEMPLATE, renderWish } from "./messages.mjs";
+import { DEFAULT_ANNIVERSARY_TEMPLATE, DEFAULT_TEMPLATE, MAX_TEMPLATE, defaultTemplateFor, renderWish } from "./messages.mjs";
+import { formatPhone, normalizePhone } from "./phone.mjs";
+import { NotSendable, destinationOf } from "./scheduler.mjs";
 import * as views from "./views.mjs";
 
 const PUBLIC_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "public");
@@ -61,13 +64,35 @@ async function loadAssets() {
   };
 }
 
+/* "Send to": '' (not chosen), 'direct' (the number beside it), a group — or,
+ * for the reminder, 'self' (the linked phone). → {sendTo} or {error}. */
+function readSendTo(value, phone, { direct = "their", self = false } = {}) {
+  if (value === "" || GROUP_JID.test(value) || (self && value === "self")) return { sendTo: value };
+  if (value === "direct") {
+    return phone ? { sendTo: "direct" } : { error: `Add ${direct} WhatsApp number first — or choose a group.` };
+  }
+  return { error: "Choose where the wish goes." };
+}
+
+const readMessage = (form, name) => form.raw(name).replace(/\r\n/g, "\n").trim().slice(0, MAX_TEMPLATE);
+
+/* A person's own send time: '' (the wish time in Settings) or HH:MM. */
+function readTime(value) {
+  return value === "" || parseTime(value) !== null ? { time: value } : { error: "Enter a time like 09:30, or leave it empty." };
+}
+
 /* What a person's form says, checked. */
-function readPerson(form) {
+function readPerson(form, countryCode) {
   const values = {
+    kind: form.get("kind") === "anniversary" ? "anniversary" : "birthday",
     name: form.get("name").replace(/\s+/g, " "),
     day: form.get("day"),
     month: form.get("month"),
     year: form.get("year"),
+    phone: form.get("phone"),
+    sendTo: form.get("sendTo"),
+    sendTime: form.get("sendTime"),
+    message: readMessage(form, "message"),
     notes: form.get("notes").slice(0, 500),
     active: form.has("active"),
   };
@@ -87,11 +112,36 @@ function readPerson(form) {
       errors.birthday = `${year} had no 29 February. Check the year, or leave it empty.`;
     }
   }
+  const phone = normalizePhone(values.phone, countryCode);
+  if (phone.error) errors.phone = phone.error;
+  const sendTo = readSendTo(values.sendTo, phone.phone);
+  if (sendTo.error && !phone.error) errors.sendTo = sendTo.error;
+  const time = readTime(values.sendTime);
+  if (time.error) errors.sendTime = time.error;
   return {
     values,
     errors,
-    data: { name: values.name, day, month, year, notes: values.notes, active: values.active, chatIds: form.all("chats") },
+    data: {
+      kind: values.kind,
+      name: values.name,
+      day,
+      month,
+      year,
+      notes: values.notes,
+      active: values.active,
+      phone: phone.phone ?? "",
+      sendTo: sendTo.sendTo ?? "",
+      sendTime: time.time ?? "",
+      message: values.message,
+    },
   };
+}
+
+/* What "Send now" did, in words. */
+function sendNowFlash(person, result) {
+  if (!result.sentNow) return ["info", `${person.name}’s wish already went out today — it was not sent again.`];
+  if (result.birthday) return ["ok", `Sent ${person.name}’s birthday wish to ${result.to.label}. It won’t go again today.`];
+  return ["ok", `Sent ${person.name}’s wish to ${result.to.label}. The one on their birthday still goes out as planned.`];
 }
 
 function outcomeFlash(result, planned) {
@@ -99,7 +149,7 @@ function outcomeFlash(result, planned) {
     case "busy":
       return ["info", "Messages are already going out. Check back in a minute."];
     case "idle":
-      return ["info", planned ? "Nothing left to send today — everything has gone out." : "Nothing to send today."];
+      return ["info", planned ? "Nothing left to send today — everything that can go has gone out." : "Nothing to send today."];
     case "waiting":
       return ["error", `Nothing was sent. ${result.detail}`];
     case "sent":
@@ -113,7 +163,7 @@ function outcomeFlash(result, planned) {
 
 export async function createApp({ config, problems = [], db, bridge, scheduler, log }) {
   const assets = await loadAssets();
-  const auth = problems.length ? null : createAuth({ password: config.adminPassword, secret: config.sessionSecret });
+  const auth = problems.length ? null : createAuth({ password: config.adminPassword, secret: config.sessionSecret, store: db.password });
   const throttle = createThrottle();
 
   /* Per request: the cookies, a flash message left by the last redirect, and
@@ -149,39 +199,63 @@ export async function createApp({ config, problems = [], db, bridge, scheduler, 
 
   async function waStatus() {
     try {
-      return { status: await bridge.status(), error: null };
+      const status = await bridge.status();
+      scheduler.noteStatus(status);
+      return { status, error: null };
     } catch (err) {
       return { status: null, error: describeError(err) };
     }
   }
 
-  function findChat(form) {
-    const chat = db.chats.get(form.get("id"));
-    if (!chat) throw new HttpError(404, "That group is no longer on the Groups page.");
-    return chat;
+  /* The groups "Send to" can choose from: fresh from WhatsApp when it is
+   * connected (and remembered), else the ones it listed last time. */
+  async function knownGroups() {
+    const { status, error } = await waStatus();
+    if (status?.state === "open") {
+      try {
+        const groups = await bridge.groups();
+        db.chats.remember(groups);
+        return { groups: groups.map((g) => ({ id: g.id, subject: g.subject || "Unnamed group" })), note: null };
+      } catch (err) {
+        return { groups: db.chats.all(), note: `${describeError(err)} These are the groups it listed before.` };
+      }
+    }
+    const groups = db.chats.all();
+    const why = error || "WhatsApp is not connected";
+    return {
+      groups,
+      note: groups.length
+        ? `${why.replace(/\.$/, "")} — the groups below are the ones it listed before.`
+        : `${why.replace(/\.$/, "")}, so its groups cannot be listed yet. Link it in Settings.`,
+    };
   }
 
-  /* Someone to show the wish preview for: whoever is next, or an example. */
-  function sampleFor(date, settings) {
-    const next = upcomingBirthdays(db.people.active(), date, 366)[0];
-    const person = next?.person ?? { id: 0, name: "Anu Joseph", day: date.day, month: date.month, year: date.year - 30 };
-    const on = next?.date ?? date;
-    const age = ageOn(person, on);
+  /* What the wish preview needs: this person, on their next birthday. */
+  function previewFor(fields, settings, groups) {
+    const { date } = scheduler.today();
+    const kind = fields.kind === "anniversary" ? "anniversary" : "birthday";
+    const who = { kind, name: fields.name || "Their name", day: fields.day || date.day, month: fields.month || date.month, year: fields.year || null };
+    const on = isValidDayMonth(Number(who.day), Number(who.month)) ? nextBirthday({ ...who, day: Number(who.day), month: Number(who.month) }, date).date : date;
+    const age = ageOn(who, on);
+    const group = GROUP_JID.test(fields.sendTo) ? groups.find((g) => g.id === fields.sendTo)?.subject || "" : "";
     return {
-      label: next ? `${person.name}, ${formatDayMonth(on)}` : "an example",
-      data: {
-        name: person.name,
-        first_name: person.name.trim().split(/\s+/)[0],
-        age: age ? String(age) : "",
-        ordinal_age: age ? ordinal(age) : "",
-      },
-      render: (chat) => renderWish(chat.template || settings.template, { person, date: on, groupName: chat.subject }),
+      defaultTemplate: defaultTemplateFor(kind, settings),
+      defaults: { birthday: settings.template, anniversary: settings.anniversaryTemplate },
+      groupName: group,
+      sample: { name: who.name, first_name: who.name.trim().split(/\s+/)[0], age: age ? String(age) : "", ordinal_age: age ? ordinal(age) : "" },
+      text: renderWish(fields.message || defaultTemplateFor(kind, settings), { person: who, date: on, groupName: group }),
     };
   }
 
   function timeZones(current) {
     const zones = Intl.supportedValuesOf("timeZone");
     return zones.includes(current) ? zones : [current, ...zones];
+  }
+
+  function personFrom(match) {
+    const person = db.people.get(Number(match[1]));
+    if (!person) throw new HttpError(404, "That person is not on the list — they may have been removed.");
+    return person;
   }
 
   /* ------------------------------------------------------------ handlers */
@@ -207,17 +281,19 @@ export async function createApp({ config, problems = [], db, bridge, scheduler, 
 
   async function today(ctx) {
     const { settings, date } = scheduler.today();
+    const people = db.people.active();
     ctx.page(
       200,
       views.todayPage({
         today: date,
         settings,
-        wa: await waStatus(),
+        wa: await waStatus(), // first: it tells the scheduler who is linked
+        reminderLabel: destinationOf(settings.reminderTo, settings.myPhone, db.chats.names())?.label ?? null,
         agenda: scheduler.agenda(),
-        upcoming: upcomingBirthdays(db.people.active(), date, 30),
+        upcoming: upcomingBirthdays(people, date, 30),
         recent: db.deliveries.recent(15),
         last: scheduler.last,
-        counts: { people: db.people.count(), chats: db.chats.all().length },
+        counts: { people: db.people.count(), unassigned: people.filter((p) => !p.sendTo).length },
         assets,
         flash: ctx.flash,
       }),
@@ -235,230 +311,243 @@ export async function createApp({ config, problems = [], db, bridge, scheduler, 
     ctx.back("/", ...outcomeFlash(await scheduler.run({ force: true, only: form.get("key") }), 1));
   }
 
-  function peopleList(ctx) {
-    const { date } = scheduler.today();
-    const assignments = db.people.assignments();
+  /* The People table, soonest birthday first (paused people last). `values`
+   * and `errors` are a failed save's, shown back as they were typed. */
+  async function renderPeople(ctx, { status = 200, values = null, errors, openDefaults = false } = {}) {
+    const { settings, date } = scheduler.today();
     const rows = db.people
       .all()
-      .map((person) => ({ person, ...nextBirthday(person, date), chatIds: [...(assignments.get(person.id) || [])] }))
+      .map((person) => ({ person, ...nextBirthday(person, date) }))
       .sort(
         (a, b) =>
           Number(b.person.active) - Number(a.person.active) ||
           a.inDays - b.inDays ||
           a.person.name.localeCompare(b.person.name),
       );
-    const chatNames = new Map(db.chats.all().map((c) => [c.id, c.subject]));
-    ctx.page(200, views.peoplePage({ rows, chatNames, assets, flash: ctx.flash }));
-  }
-
-  function personNew(ctx) {
-    const chats = db.chats.all();
+    // What each row shows: as typed, for a row of a save that failed (someone
+    // added since has none), else as saved.
+    const shown = new Map(
+      rows.map(({ person: p }) => [
+        p.id,
+        values?.get(p.id) ?? { phone: formatPhone(p.phone), sendTo: p.sendTo, sendTime: p.sendTime, message: p.message },
+      ]),
+    );
+    const { groups, note } = rows.length ? await knownGroups() : { groups: [], note: null };
     ctx.page(
-      200,
-      views.personFormPage({
-        person: null,
-        values: { name: "", day: "", month: "", year: "", notes: "", active: true },
-        chats,
-        selected: new Set(chats.filter((c) => c.wishes).map((c) => c.id)),
+      status,
+      views.peoplePage({
+        rows,
+        groups,
+        groupsNote: note,
+        values: shown,
+        errors,
+        wishTime: settings.wishTime,
+        defaults: { birthday: settings.template, anniversary: settings.anniversaryTemplate, open: openDefaults },
         assets,
         flash: ctx.flash,
       }),
     );
   }
 
-  async function personCreate(ctx) {
-    const { values, errors, data } = readPerson(await readForm(ctx.req));
-    if (!errors.name && !errors.birthday && db.people.exists(data.name, data.day, data.month)) {
-      errors.name = `${data.name} is already on the list with this birthday.`;
+  const peopleList = (ctx) => renderPeople(ctx, { openDefaults: ctx.url.searchParams.has("defaults") });
+
+  /* The Default messages panel on People (the same two as on Settings). */
+  async function defaultMessagesSave(ctx) {
+    const form = await readForm(ctx.req);
+    db.settings.save({
+      template: readMessage(form, "template") || DEFAULT_TEMPLATE,
+      anniversaryTemplate: readMessage(form, "anniversaryTemplate") || DEFAULT_ANNIVERSARY_TEMPLATE,
+    });
+    ctx.back("/people?defaults#default-messages", "ok", "Default messages saved.");
+  }
+
+  async function peopleSave(ctx) {
+    const form = await readForm(ctx.req, 4_000_000);
+    const { countryCode } = db.settings.get();
+    const values = new Map();
+    const errors = new Map();
+    const rows = [];
+    for (const id of new Set(form.all("id").map(Number).filter(Number.isInteger))) {
+      if (!db.people.get(id)) continue; // removed meanwhile
+      const typed = {
+        phone: form.get(`phone_${id}`),
+        sendTo: form.get(`send_to_${id}`),
+        sendTime: form.get(`time_${id}`),
+        message: readMessage(form, `message_${id}`),
+      };
+      values.set(id, typed);
+      const phone = normalizePhone(typed.phone, countryCode);
+      const sendTo = readSendTo(typed.sendTo, phone.phone);
+      const time = readTime(typed.sendTime);
+      const problems = {};
+      if (phone.error) problems.phone = phone.error;
+      else if (sendTo.error) problems.sendTo = sendTo.error;
+      if (time.error) problems.sendTime = time.error;
+      if (Object.keys(problems).length) errors.set(id, problems);
+      else rows.push({ id, phone: phone.phone, sendTo: sendTo.sendTo, sendTime: time.time, message: typed.message });
     }
-    if (Object.keys(errors).length) {
-      return ctx.page(
-        422,
-        views.personFormPage({ person: null, values, chats: db.chats.all(), selected: new Set(data.chatIds), errors, assets }),
+    if (errors.size) {
+      return renderPeople(ctx, { status: 422, values, errors }).then(() => undefined);
+    }
+    db.people.updateMany(rows);
+
+    // A row's "Delete" submits the whole table too: saved first, then that
+    // row goes.
+    const deleteId = Number(form.get("delete"));
+    if (deleteId) {
+      const person = db.people.get(deleteId);
+      if (person) db.people.remove(person.id);
+      return ctx.back(
+        "/people",
+        "ok",
+        person ? `Deleted ${person.name}’s ${person.kind} (${person.day} ${MONTHS[person.month - 1]}).` : "Already deleted.",
       );
     }
-    db.people.create(data);
-    ctx.back("/people", "ok", `Added ${data.name}.`);
+
+    // A row's "Send now" submits the whole table: saved first, then sent.
+    const sendId = Number(form.get("send"));
+    if (sendId) {
+      const person = db.people.get(sendId);
+      if (!person) return ctx.back("/people", "error", "That person is no longer on the list.");
+      try {
+        return ctx.back("/people", ...sendNowFlash(person, await scheduler.sendNow(person)));
+      } catch (err) {
+        return ctx.back("/people", "error", `Saved, but ${person.name}’s wish was not sent: ${err instanceof NotSendable ? err.message : describeError(err)}`);
+      }
+    }
+    const unassigned = db.people.active().filter((p) => !p.sendTo).length;
+    ctx.back("/people", "ok", `Saved.${unassigned ? ` ${plural(unassigned, "person has", "people have")} no “Send to” yet — their wish won’t be sent.` : ""}`);
   }
 
-  function personFrom(match) {
-    const person = db.people.get(Number(match[1]));
-    if (!person) throw new HttpError(404, "That person is not on the list — they may have been removed.");
-    return person;
-  }
-
-  function personEdit(ctx, match) {
-    const person = personFrom(match);
+  async function renderPersonForm(ctx, { status = 200, person = null, values, errors = {} }) {
+    const settings = db.settings.get();
+    const { groups } = await knownGroups();
     ctx.page(
-      200,
+      status,
       views.personFormPage({
         person,
-        values: { ...person, year: person.year ?? "" },
-        chats: db.chats.all(),
-        selected: new Set(db.people.chatIds(person.id)),
+        values,
+        groups,
+        errors,
+        preview: previewFor(values, settings, groups),
+        birthdayToday: person ? isBirthdayOn(person, scheduler.today().date) : false,
+        wishTime: settings.wishTime,
+        previewTo: settings.myPhone ? formatPhone(settings.myPhone) : "the linked phone",
         assets,
         flash: ctx.flash,
       }),
     );
   }
+
+  const personNew = (ctx) =>
+    renderPersonForm(ctx, {
+      values: {
+        kind: ctx.url.searchParams.get("kind") === "anniversary" ? "anniversary" : "birthday",
+        name: "",
+        day: "",
+        month: "",
+        year: "",
+        phone: "",
+        sendTo: "",
+        sendTime: "",
+        message: "",
+        notes: "",
+        active: true,
+      },
+    });
+
+  async function personCreate(ctx) {
+    const { values, errors, data } = readPerson(await readForm(ctx.req), db.settings.get().countryCode);
+    if (!errors.name && !errors.birthday && db.people.exists(data.name, data.day, data.month, data.kind)) {
+      errors.name = `${data.name} is already on the list with this ${data.kind}.`;
+    }
+    if (Object.keys(errors).length) return renderPersonForm(ctx, { status: 422, values, errors });
+    db.people.create(data);
+    ctx.back("/people", "ok", `Added ${data.name}’s ${data.kind}.${data.sendTo ? "" : " Choose where the wish goes."}`);
+  }
+
+  const personEdit = (ctx, match) => {
+    const person = personFrom(match);
+    return renderPersonForm(ctx, { person, values: { ...person, year: person.year ?? "", phone: formatPhone(person.phone) } });
+  };
 
   async function personUpdate(ctx, match) {
     const person = personFrom(match);
-    const { values, errors, data } = readPerson(await readForm(ctx.req));
-    if (Object.keys(errors).length) {
-      return ctx.page(
-        422,
-        views.personFormPage({ person, values, chats: db.chats.all(), selected: new Set(data.chatIds), errors, assets }),
-      );
-    }
+    const { values, errors, data } = readPerson(await readForm(ctx.req), db.settings.get().countryCode);
+    if (Object.keys(errors).length) return renderPersonForm(ctx, { status: 422, person, values, errors });
     db.people.update(person.id, data);
     ctx.back("/people", "ok", `Saved ${data.name}.`);
+  }
+
+  async function personPreview(ctx, match) {
+    await readForm(ctx.req);
+    const person = personFrom(match);
+    try {
+      await scheduler.sendPreview(person);
+      ctx.back(`/people/${person.id}`, "ok", "Preview sent to your number.");
+    } catch (err) {
+      ctx.back(`/people/${person.id}`, "error", err instanceof NotSendable ? err.message : describeError(err));
+    }
+  }
+
+  async function personSendNow(ctx, match) {
+    await readForm(ctx.req);
+    const person = personFrom(match);
+    try {
+      ctx.back(`/people/${person.id}`, ...sendNowFlash(person, await scheduler.sendNow(person)));
+    } catch (err) {
+      ctx.back(`/people/${person.id}`, "error", err instanceof NotSendable ? err.message : describeError(err));
+    }
   }
 
   async function personDelete(ctx, match) {
     await readForm(ctx.req);
     const person = db.people.get(Number(match[1]));
     if (person) db.people.remove(person.id);
-    ctx.back("/people", "ok", person ? `Removed ${person.name} from the list.` : "Already removed.");
+    ctx.back("/people", "ok", person ? `Deleted ${person.name}’s ${person.kind}.` : "Already deleted.");
   }
 
   function importForm(ctx) {
-    ctx.page(200, views.importPage({ chats: db.chats.all(), assets, flash: ctx.flash }));
+    ctx.page(200, views.importPage({ countryCode: db.settings.get().countryCode, assets, flash: ctx.flash }));
   }
 
   async function importList(ctx) {
-    const form = await readForm(ctx.req, 2_000_000);
+    const form = await readForm(ctx.req, 4_000_000);
     const text = form.raw("list");
-    const { people, errors } = parsePeople(text);
-    const chats = db.chats.all();
-    const byName = new Map(chats.map((c) => [c.subject.trim().toLowerCase(), c]));
-    const everyWishGroup = chats.filter((c) => c.wishes).map((c) => c.id);
-    const warnings = [];
-    let added = 0;
+    const { countryCode } = db.settings.get();
+    const { groups } = await knownGroups();
+    const groupsByName = new Map(groups.map((g) => [g.subject.trim().toLowerCase(), g.id]));
+    const { people, errors, warnings } = parsePeople(text, { countryCode, groupsByName });
+    const added = { birthday: 0, anniversary: 0 };
     let duplicates = 0;
     db.transaction(() => {
       for (const p of people) {
-        if (db.people.exists(p.name, p.day, p.month)) {
+        if (db.people.exists(p.name, p.day, p.month, p.kind)) {
           duplicates++;
           continue;
         }
-        let chatIds = everyWishGroup;
-        if (p.groupNames) {
-          chatIds = [];
-          for (const name of p.groupNames) {
-            const chat = byName.get(name.toLowerCase());
-            if (chat) chatIds.push(chat.id);
-            else warnings.push(`Line ${p.line}: there is no group called “${name}” — ${p.name} was added without it.`);
-          }
-        }
-        db.people.create({ name: p.name, day: p.day, month: p.month, year: p.year, notes: p.notes, active: true, chatIds });
-        added++;
+        db.people.create({ ...p, active: true });
+        added[p.kind]++;
       }
     });
-    log.info({ added, duplicates, errors: errors.length }, "imported people");
+    log.info({ ...added, duplicates, errors: errors.length, warnings: warnings.length }, "imported people");
     ctx.page(
       errors.length ? 422 : 200,
       views.importPage({
         result: { added, duplicates, errors, warnings },
-        // Kept when some lines failed: fix them and import again — the lines
+        // Kept when some lines failed: fix them and add again — the lines
         // that went in are skipped as already on the list.
         text: errors.length ? text : "",
-        chats,
+        countryCode,
         assets,
       }),
     );
   }
 
-  async function groupsList(ctx) {
-    const wa = await waStatus();
-    let available = null;
-    if (wa.status?.state === "open") {
-      try {
-        const groups = await bridge.groups();
-        for (const g of groups) if (g.subject) db.chats.rename(g.id, g.subject);
-        const added = new Set(db.chats.all().map((c) => c.id));
-        available = groups.filter((g) => !added.has(g.id));
-      } catch (err) {
-        wa.error = describeError(err);
-      }
-    } else if (wa.status) {
-      wa.error = "WhatsApp is not connected.";
-    }
-    const settings = db.settings.get();
-    ctx.page(
-      200,
-      views.groupsPage({
-        chats: db.chats.all(),
-        counts: db.chats.memberCounts(),
-        available,
-        wa,
-        sample: sampleFor(scheduler.today().date, settings),
-        defaultTemplate: settings.template,
-        assets,
-        flash: ctx.flash,
-      }),
-    );
-  }
+  /* WhatsApp is a section of Settings now; old links still arrive. */
+  const whatsapp = (ctx) => redirect(ctx.res, "/settings#whatsapp");
 
-  async function groupAdd(ctx) {
-    const form = await readForm(ctx.req);
-    const id = form.get("id");
-    if (!GROUP_JID.test(id)) throw new HttpError(400, "That is not a WhatsApp group.");
-    const subject = form.get("subject").slice(0, 200) || "Unnamed group";
-    const forReminder = form.get("purpose") === "reminders";
-    db.chats.add({ id, subject, wishes: !forReminder, reminders: forReminder });
-    ctx.back(
-      "/groups",
-      "ok",
-      forReminder
-        ? `Your daily reminder will be posted in ${subject}.`
-        : db.people.count()
-          ? `Added ${subject}. Choose who is wished there — “Wish everyone on the list here” adds everyone at once.`
-          : `Added ${subject}.`,
-    );
-  }
-
-  async function groupUpdate(ctx) {
-    const form = await readForm(ctx.req);
-    const chat = findChat(form);
-    let template = form.raw("template").replace(/\r\n/g, "\n").trim().slice(0, MAX_TEMPLATE);
-    if (template === db.settings.get().template.trim()) template = "";
-    db.chats.update(chat.id, { wishes: form.has("wishes"), reminders: form.has("reminders"), template });
-    ctx.back("/groups", "ok", `Saved ${chat.subject}.`);
-  }
-
-  async function groupEveryone(ctx) {
-    const chat = findChat(await readForm(ctx.req));
-    const n = db.chats.addEveryone(chat.id);
-    ctx.back(
-      "/groups",
-      "ok",
-      n ? `${plural(n, "person", "people")} added — everyone on the list is wished in ${chat.subject}.` : `Everyone on the list was already wished in ${chat.subject}.`,
-    );
-  }
-
-  async function groupTest(ctx) {
-    const chat = findChat(await readForm(ctx.req));
-    try {
-      await scheduler.sendTest(chat);
-      ctx.back("/groups", "ok", `Posted a test message in ${chat.subject}.`);
-    } catch (err) {
-      ctx.back("/groups", "error", describeError(err));
-    }
-  }
-
-  async function groupRemove(ctx) {
-    const chat = findChat(await readForm(ctx.req));
-    db.chats.remove(chat.id);
-    ctx.back("/groups", "ok", `Stopped posting in ${chat.subject}.`);
-  }
-
-  async function whatsapp(ctx) {
-    const wa = await waStatus();
-    ctx.page(200, views.whatsappPage({ status: wa.status, error: wa.error, assets, flash: ctx.flash }));
-  }
-
-  /* For the WhatsApp page's polling. Never the QR itself — that is only ever
+  /* For the WhatsApp section's polling (Settings). Never the QR itself — that is only ever
    * the image below. */
   async function whatsappStatusJson(ctx) {
     const { status, error } = await waStatus();
@@ -481,9 +570,9 @@ export async function createApp({ config, problems = [], db, bridge, scheduler, 
     await readForm(ctx.req);
     try {
       await bridge.pair();
-      ctx.back("/whatsapp");
+      ctx.back("/settings#whatsapp");
     } catch (err) {
-      ctx.back("/whatsapp", "error", describeError(err));
+      ctx.back("/settings#whatsapp", "error", describeError(err));
     }
   }
 
@@ -491,15 +580,55 @@ export async function createApp({ config, problems = [], db, bridge, scheduler, 
     await readForm(ctx.req);
     try {
       const status = await bridge.logout();
-      ctx.back("/whatsapp", status.last_error ? "info" : "ok", status.last_error || "Unlinked. Nothing is sent until a phone is linked again.");
+      ctx.back("/settings#whatsapp", status.last_error ? "info" : "ok", status.last_error || "Unlinked. Nothing is sent until a phone is linked again.");
     } catch (err) {
-      ctx.back("/whatsapp", "error", describeError(err));
+      ctx.back("/settings#whatsapp", "error", describeError(err));
     }
+  }
+
+  async function renderSettings(ctx, { status = 200, values, errors = {} }) {
+    const wa = await waStatus();
+    const { groups } = await knownGroups();
+    ctx.page(status, views.settingsPage({ values, errors, timeZones: timeZones(values.timezone), groups, wa, assets, flash: ctx.flash }));
+  }
+
+  /* Settings → Password. The current one first, counted like a sign-in, so
+   * a borrowed session cannot be turned into a guessing machine. Answers go
+   * back as a flash message, never with what was typed. */
+  async function passwordSave(ctx) {
+    const { req, res } = ctx;
+    const form = await readForm(req, 10_000);
+    const address = clientAddress(req);
+    const wait = throttle.waitMinutes(address);
+    if (wait) return ctx.back("/settings", "error", `Too many wrong passwords. Try again in ${plural(wait, "minute")}.`);
+    const next = form.raw("next");
+    if (!auth.checkPassword(form.raw("current"))) {
+      throttle.fail(address);
+      log.warn({ address }, "password not changed: wrong current password");
+      return ctx.back("/settings", "error", "The current password is not right, so the password was not changed.");
+    }
+    if (next.length < MIN_PASSWORD || next.length > MAX_PASSWORD) {
+      return ctx.back("/settings", "error", `The new password needs ${MIN_PASSWORD} to ${MAX_PASSWORD} characters. Nothing was changed.`);
+    }
+    if (next !== form.raw("again")) return ctx.back("/settings", "error", "The two new passwords are not the same. Nothing was changed.");
+    auth.setPassword(next);
+    throttle.reset(address);
+    log.info({ address }, "password changed");
+    // This browser stays signed in (a cookie under the new key); every other
+    // one is signed out by the change itself.
+    const secure = isHttps(req);
+    const flash = Buffer.from(JSON.stringify({ type: "ok", text: "Password changed. Every other browser is signed out." })).toString("base64url");
+    redirect(res, "/settings", {
+      "set-cookie": [
+        serializeCookie(COOKIE, auth.issue(), { maxAge: MAX_AGE_S, secure }),
+        serializeCookie(FLASH, flash, { maxAge: 60, secure }),
+      ],
+    });
   }
 
   function settingsForm(ctx) {
     const values = db.settings.get();
-    ctx.page(200, views.settingsPage({ values, timeZones: timeZones(values.timezone), assets, flash: ctx.flash }));
+    return renderSettings(ctx, { values: { ...values, myPhone: formatPhone(values.myPhone) } });
   }
 
   async function settingsSave(ctx) {
@@ -511,7 +640,11 @@ export async function createApp({ config, problems = [], db, bridge, scheduler, 
       reminderTime: form.get("reminderTime"),
       timezone: isValidTimeZone(form.get("timezone")) ? form.get("timezone") : before.timezone,
       daysAhead: form.get("daysAhead"),
-      template: form.raw("template").replace(/\r\n/g, "\n").trim(),
+      template: readMessage(form, "template"),
+      anniversaryTemplate: readMessage(form, "anniversaryTemplate"),
+      myPhone: form.get("myPhone"),
+      reminderTo: form.get("reminderTo"),
+      countryCode: form.get("countryCode").replace(/^\+/, ""),
     };
     const errors = {};
     if (parseTime(values.wishTime) === null) errors.wishTime = "Enter a time like 08:00.";
@@ -520,17 +653,25 @@ export async function createApp({ config, problems = [], db, bridge, scheduler, 
     if (values.daysAhead === "" || !Number.isInteger(daysAhead) || daysAhead < 0 || daysAhead > 30) {
       errors.daysAhead = "Enter a whole number from 0 to 30.";
     }
-    if (values.template.length > MAX_TEMPLATE) errors.template = `Keep the message to ${MAX_TEMPLATE} characters.`;
-    if (Object.keys(errors).length) {
-      return ctx.page(422, views.settingsPage({ values, errors, timeZones: timeZones(values.timezone), assets }));
-    }
-    db.settings.save({ ...values, daysAhead, template: values.template || DEFAULT_TEMPLATE });
+    if (!/^[1-9]\d{0,3}$/.test(values.countryCode)) errors.countryCode = "Enter a country code, like 91.";
+    const myPhone = normalizePhone(values.myPhone, errors.countryCode ? before.countryCode : values.countryCode);
+    if (myPhone.error) errors.myPhone = myPhone.error;
+    const reminderTo = readSendTo(values.reminderTo, myPhone.phone, { direct: "your", self: true });
+    if (reminderTo.error && !myPhone.error) errors.reminderTo = reminderTo.error;
+    if (Object.keys(errors).length) return renderSettings(ctx, { status: 422, values, errors });
+
+    db.settings.save({
+      ...values,
+      daysAhead,
+      template: values.template || DEFAULT_TEMPLATE,
+      anniversaryTemplate: values.anniversaryTemplate || DEFAULT_ANNIVERSARY_TEMPLATE,
+      myPhone: myPhone.phone,
+      reminderTo: reminderTo.sendTo,
+    });
     let text = "Settings saved.";
     if (values.enabled && !before.enabled) {
-      const due = scheduler.agenda().filter((job) => job.due && job.delivery?.status !== "sent");
-      text = due.length
-        ? `Sending is on. ${plural(due.length, "message")} due today will go out within a minute.`
-        : "Sending is on.";
+      const due = scheduler.agenda().filter((job) => job.to && job.due && job.delivery?.status !== "sent");
+      text = due.length ? `Sending is on. ${plural(due.length, "message")} due today will go out within a minute.` : "Sending is on.";
     } else if (!values.enabled && before.enabled) {
       text = "Sending is paused. Nothing goes out on its own until you turn it back on.";
     }
@@ -542,25 +683,24 @@ export async function createApp({ config, problems = [], db, bridge, scheduler, 
     ["POST", /^\/run$/, runNow],
     ["POST", /^\/retry$/, retry],
     ["GET", /^\/people$/, peopleList],
+    ["POST", /^\/people\/save$/, peopleSave],
     ["GET", /^\/people\/new$/, personNew],
     ["POST", /^\/people$/, personCreate],
     ["GET", /^\/people\/import$/, importForm],
     ["POST", /^\/people\/import$/, importList],
     ["GET", /^\/people\/(\d+)$/, personEdit],
     ["POST", /^\/people\/(\d+)$/, personUpdate],
+    ["POST", /^\/people\/(\d+)\/preview$/, personPreview],
+    ["POST", /^\/people\/(\d+)\/send$/, personSendNow],
     ["POST", /^\/people\/(\d+)\/delete$/, personDelete],
-    ["GET", /^\/groups$/, groupsList],
-    ["POST", /^\/groups\/add$/, groupAdd],
-    ["POST", /^\/groups\/update$/, groupUpdate],
-    ["POST", /^\/groups\/everyone$/, groupEveryone],
-    ["POST", /^\/groups\/test$/, groupTest],
-    ["POST", /^\/groups\/remove$/, groupRemove],
     ["GET", /^\/whatsapp$/, whatsapp],
     ["GET", /^\/whatsapp\/status\.json$/, whatsappStatusJson],
     ["GET", /^\/whatsapp\/qr\.svg$/, whatsappQr],
     ["POST", /^\/whatsapp\/pair$/, whatsappPair],
     ["POST", /^\/whatsapp\/logout$/, whatsappLogout],
     ["GET", /^\/settings$/, settingsForm],
+    ["POST", /^\/settings\/messages$/, defaultMessagesSave],
+    ["POST", /^\/settings\/password$/, passwordSave],
     ["POST", /^\/settings$/, settingsSave],
   ];
 

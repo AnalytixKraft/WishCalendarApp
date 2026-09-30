@@ -1,13 +1,14 @@
 /* The WhatsApp side of the bridge: one Baileys linked-device session, the
  * state machine around it, and the only three things the API may ask of it —
- * link a phone, list the groups it is in, post text into one of them.
+ * link a phone, list the groups it is in, post text into a group or to a
+ * person by phone number.
  *
  * Adapted from the WhatsApp bridge AnalytixKraft runs for its bug tracker
- * (itself lifted from AnalytixKraft/medha), keeping only what a few group
- * posts a day need: the multi-file auth store and its save queue, the
- * creds.json backup, QR pairing with the 515 restart, and a text send. Left
- * behind on purpose: every inbound handler, every kind of media, polls,
- * reactions, DMs, and any message store.
+ * (itself lifted from AnalytixKraft/medha), keeping only what a few messages
+ * a day need: the multi-file auth store and its save queue, the creds.json
+ * backup, QR pairing with the 515 restart, and a text send. Left behind on
+ * purpose: every inbound handler, every kind of media, polls, reactions, and
+ * any message store.
  *
  * States (the API reports them verbatim; whatsapp/README.md has the table):
  *   idle        no linked device, and NOT trying — no pairing churn against
@@ -35,14 +36,14 @@ import makeWASocket, {
 } from "@whiskeysockets/baileys";
 import { BridgeError, TtlCache, baileysLog, log, withTimeout } from "./util.mjs";
 
-/* The `whatsapp_auth` volume. auth/ is the linked-device session — a live
- * credential for the WhatsApp account. */
-const AUTH_DIR = "/data/auth";
+/* auth/ under DATA_DIR — the `whatsapp_auth` volume in Docker — is the
+ * linked-device session: a live credential for the WhatsApp account. */
+const AUTH_DIR = join(process.env.DATA_DIR || "/data", "auth");
 const CREDS = join(AUTH_DIR, "creds.json");
 const CREDS_BACKUP = join(AUTH_DIR, "creds.json.bak");
 
 /* What the phone's Settings → Linked devices list shows for this link. */
-const DEVICE_NAME = "Birthday Reminder";
+const DEVICE_NAME = "Wish Calendar";
 
 const BACKOFF_MIN_MS = 2_000;
 const BACKOFF_MAX_MS = 60_000;
@@ -62,6 +63,14 @@ const QUERY_TIMEOUT_MS = 30_000;
 const LOGOUT_TIMEOUT_MS = 10_000;
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60_000;
 const GROUP_METADATA_TTL_MS = 5 * 60_000;
+/* Direct messages from an unofficial client to people who may never have
+ * written to the number are what WhatsApp's spam detection looks for. A
+ * birthday list sends a handful a day; this cap is for the day something
+ * goes wrong — a loop, a leaked token — so it cannot turn into a burst. */
+const DIRECT_PER_HOUR = 30;
+/* Whether a number is on WhatsApp, and under which JID, asked once a day
+ * per number rather than before every message. */
+const LOOKUP_TTL_MS = 24 * 60 * 60_000;
 
 const BAILEYS_VERSION = createRequire(import.meta.url)("@whiskeysockets/baileys/package.json").version;
 
@@ -138,6 +147,13 @@ function logFailure(what) {
   return (err) => log.error({ err: describe(err) }, `failed while ${what}`);
 }
 
+/* A person's number in the log: enough to tell two apart, not enough to
+ * dial. */
+function masked(jid) {
+  const digits = String(jid).split("@")[0];
+  return `…${digits.slice(-4)}`;
+}
+
 function meOf(me) {
   return me?.id ? { id: jidNormalizedUser(me.id), name: me.name || null } : null;
 }
@@ -172,25 +188,33 @@ function findMe(meta, mine) {
  *   - the linked account itself, which is no stranger: the phone's own
  *     protocol messages (app-state keys) and device-list changes are
  *     Baileys' business, and starving it of them is a risk with no gain.
- * Dropped: everyone else — DMs, calls, status updates, broadcast lists,
- * channels, and other users' device and key-change notices. The send needs
- * none of these: it fetches members' device lists fresh (Baileys keeps them
- * 5 min), and a member whose keys changed answers with a retry receipt,
- * which comes from the group's JID.
+ *   - the people this bridge has sent a direct message to (`peers`: their
+ *     phone-number JID and, once WhatsApp has told us, their LID). A 1:1
+ *     message's receipts come from the person's own JID — among them the
+ *     retry receipt their phone sends when it cannot decrypt the message,
+ *     which Baileys answers by re-sending. Dropped, the message would sit on
+ *     their phone as "Waiting for this message".
+ * Dropped: everyone else — strangers' DMs, calls, status updates, broadcast
+ * lists, channels, and other users' device and key-change notices. The send
+ * needs none of these: it fetches device lists fresh (Baileys keeps them
+ * 5 min), and a group member whose keys changed answers with a retry
+ * receipt, which comes from the group's JID.
  * The server's own `@s.whatsapp.net` (pre-key top-ups and the like) is never
  * put to this; Baileys exempts it.
  *
  * NOT closed: messages members post in a group the number is in are still
- * decrypted. The hook sees only a JID, and a group's messages share it with
- * the receipts the send depends on.
+ * decrypted, and so is a reply from someone it messaged directly. The hook
+ * sees only a JID, and those share it with the receipts the send depends on.
+ * Nothing acts on either.
  *
  * `me` is creds.me, read at each call: Baileys fills it in on the object
  * itself when a pairing succeeds. Before that (pairing) there is no "self",
  * and nothing but groups gets through — nothing else is needed to pair. */
-export function ignoresSender(jid, me) {
+export function ignoresSender(jid, me, peers = new Set()) {
   if (isJidGroup(jid)) return false;
   const from = jidDecode(jid);
   if (!from) return true;
+  if (peers.has(`${from.user}@${from.server}`)) return false;
   // User AND server: a LID and a phone number are separate number spaces,
   // and the same digits in the other one are somebody else.
   const isSelf = [me?.id, me?.lid].some((own) => {
@@ -253,6 +277,13 @@ export async function startSession() {
   const groupMetadata = new TtlCache(GROUP_METADATA_TTL_MS);
   const sent = new TtlCache(IDEMPOTENCY_TTL_MS);
   const inflight = new Map();
+  /* Direct messages: whom we have written to (ignoresSender lets their
+   * receipts through), when (the hourly cap), and which numbers WhatsApp
+   * says it knows. Memory only: after a restart a person is let through
+   * again from the next message to them on. */
+  const peers = new Set();
+  const directSentAt = [];
+  const lookups = new TtlCache(LOOKUP_TTL_MS);
   /* pair(), logout() and the pairing deadline each read the state, await
    * (a socket ending, the directory being wiped), then act on what they
    * read. Run them one at a time, in arrival order, so none acts on a state
@@ -403,9 +434,10 @@ export async function startSession() {
         // Without this every group send first re-fetches the group's member
         // list from WhatsApp.
         cachedGroupMetadata: async (jid) => groupMetadata.get(jid),
-        // Everything inbound that is not a group or this account is dropped
-        // undecrypted — ignoresSender, above, says what that keeps and why.
-        shouldIgnoreJid: (jid) => ignoresSender(jid, auth.creds.me),
+        // Everything inbound that is not a group, this account or someone it
+        // wrote to is dropped undecrypted — ignoresSender, above, says what
+        // that keeps and why.
+        shouldIgnoreJid: (jid) => ignoresSender(jid, auth.creds.me, peers),
       });
       sock = socket;
 
@@ -591,7 +623,7 @@ export async function startSession() {
     await wipe();
     const lastError =
       hadDevice && !told
-        ? `unlinked here while WhatsApp could not be told, so the phone may still list this device: remove "${DEVICE_NAME}" under Settings → Linked devices`
+        ? "unlinked here while WhatsApp could not be told, so the phone may still list this computer: remove it under Settings → Linked devices"
         : null;
     setState("idle", { lastError });
     log.info(told ? "unlinked: WhatsApp told, session wiped" : "unlinked: session wiped");
@@ -633,7 +665,63 @@ export async function startSession() {
     );
   }
 
-  async function deliver(socket, chatId, text) {
+  function deliver(socket, chatId, text) {
+    return isJidGroup(chatId) ? deliverToGroup(socket, chatId, text) : deliverDirect(socket, chatId, text);
+  }
+
+  /* One text to one person, by phone number: only to a number WhatsApp
+   * knows, only DIRECT_PER_HOUR an hour, and with that person's receipts let
+   * through (ignoresSender). */
+  async function deliverDirect(socket, chatId, text) {
+    const hourAgo = Date.now() - 60 * 60_000;
+    while (directSentAt.length && directSentAt[0] <= hourAgo) directSentAt.shift();
+    if (directSentAt.length >= DIRECT_PER_HOUR) {
+      throw new BridgeError(429, "rate_limited", `at most ${DIRECT_PER_HOUR} direct messages an hour`);
+    }
+
+    let target = lookups.get(chatId);
+    if (target === undefined) {
+      let found;
+      try {
+        [found] = (await withTimeout(socket.onWhatsApp(chatId), QUERY_TIMEOUT_MS)) || [];
+      } catch (err) {
+        throw new BridgeError(502, "send_failed", `could not look the number up on WhatsApp: ${describe(err)}`);
+      }
+      // WhatsApp's own JID for the number, which can differ from the digits
+      // as typed (some countries' mobile prefixes).
+      target = found?.exists ? jidNormalizedUser(found.jid) : false;
+      lookups.set(chatId, target);
+    }
+    if (!target) {
+      log.warn({ to: masked(chatId) }, "send refused: the number is not on WhatsApp");
+      throw new BridgeError(404, "not_on_whatsapp");
+    }
+
+    const admit = (jid) => {
+      const who = jid && jidDecode(jid);
+      if (who) peers.add(`${who.user}@${who.server}`);
+    };
+    const lidOf = () => socket.signalRepository.lidMapping.getLIDForPN(target).catch(() => null);
+    admit(target);
+    admit(await lidOf());
+
+    let msg;
+    try {
+      msg = await socket.sendMessage(target, { text, linkPreview: null }); // linkPreview: see deliverToGroup
+    } catch (err) {
+      throw new BridgeError(502, "send_failed", describeSendFailure(err));
+    }
+    directSentAt.push(Date.now());
+    // The send looks the person's devices up, which is often when WhatsApp
+    // first tells us their LID — and their receipts may come from that.
+    admit(await lidOf());
+    const messageId = msg?.key?.id;
+    if (!messageId) throw new BridgeError(502, "send_failed", "WhatsApp returned no message id");
+    log.info({ to: masked(chatId), message_id: messageId, kind: "text" }, "sent"); // never the text, never the whole number
+    return { message_id: messageId, chat_id: chatId };
+  }
+
+  async function deliverToGroup(socket, chatId, text) {
     // Fresh metadata, not the cache: this runs a few times a day, and a stale
     // member list is exactly how "we were removed yesterday" turns into a
     // confusing send failure instead of a clear not_a_member. Caching it here
@@ -748,7 +836,7 @@ export async function startSession() {
     void connect();
   } else {
     if (creds) await wipe(); // a pairing that never finished: useless, and it would confuse the next one
-    log.info("no linked device; idle until someone links one (the app's WhatsApp page → Link a phone)");
+    log.info("no linked device; idle until someone links one (the app's Settings → WhatsApp → Link a phone)");
   }
 
   // pair and logout queue behind each other (exclusive(), above). stop()
