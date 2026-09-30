@@ -48,7 +48,7 @@ bash scripts/setup.sh
 bash scripts/native/install.sh
 ```
 
-That installs the Node packages and two launchd agents — the app and the WhatsApp bridge — that start when you sign in and start again if they ever stop. Data lives in `~/Library/Application Support/WishCalendar`, logs in `~/Library/Logs/WishCalendar`. Both listen on 127.0.0.1 only. After `git pull`, run it again. `scripts/native/status.sh` says how it is; `scripts/native/uninstall.sh` stops it and keeps the data.
+That copies this version of the code to `~/Library/Application Support/WishCalendar/release`, installs its Node packages there, and two launchd agents — the app and the WhatsApp bridge — that start when you sign in and start again if they ever stop. They run that copy, so editing this folder or switching git branches changes nothing until you run `install.sh` again (after `git pull`, say). An update stops the old version, starts the new one and checks both answer — a couple of seconds — and if the new one does not come up, it puts the old one back and starts it again, so an update never leaves it down. Data lives in `~/Library/Application Support/WishCalendar`, logs in `~/Library/Logs/WishCalendar`. Both listen on 127.0.0.1 only. `scripts/native/status.sh` says how it is; `scripts/native/uninstall.sh` stops it and keeps the data.
 
 **In Docker** — any computer with [Docker Desktop](https://www.docker.com/products/docker-desktop/) or Docker Engine:
 

@@ -3,7 +3,7 @@
 # in Docker.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LABEL_PREFIX="tech.analytixkraft.wishcalendar"
+LABEL_PREFIX="${WISH_CALENDAR_LABEL:-tech.analytixkraft.wishcalendar}"
 SUPPORT_DIR="${WISH_CALENDAR_HOME:-$HOME/Library/Application Support/WishCalendar}"
 LOG_DIR="${WISH_CALENDAR_LOGS:-$HOME/Library/Logs/WishCalendar}"
 AGENTS_DIR="$HOME/Library/LaunchAgents"

@@ -248,6 +248,22 @@ test("Settings says plainly what the sending switch does", async () => {
   assert.match(page, /<section class="card" id="password"/);
 });
 
+test("a row's Delete saves the table, then deletes that row only", async () => {
+  const cookie = await signIn();
+  const keep = db.people.create({ name: "Keep Me", day: 9, month: 9 });
+  const gone = db.people.create({ name: "Delete Me", day: 10, month: 9 });
+  const res = await post(
+    "/people/save",
+    [["id", String(keep)], [`message_${keep}`, "Saved first"], ["id", String(gone)], ["delete", String(gone)]],
+    { cookie },
+  );
+  assert.equal(res.status, 303);
+  assert.equal(db.people.get(gone), null);
+  assert.equal(db.people.get(keep).message, "Saved first");
+  const table = await (await get("/people", cookie)).text();
+  assert.match(table, new RegExp(`name="delete" value="${keep}"[^>]*data-confirm="Delete Keep Me’s birthday`));
+});
+
 test("the reminder to my number needs my number", async () => {
   const cookie = await signIn();
   const base = { wishTime: "08:00", reminderTime: "07:00", timezone: "Asia/Kolkata", daysAhead: "1", countryCode: "91", template: "" };

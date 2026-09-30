@@ -403,7 +403,10 @@ ${rows.length
         <input type="hidden" name="id" value="${p.id}">
         <a href="/people/${p.id}">${p.name}</a>${p.active ? "" : html` <span class="chip chip--muted">Paused</span>`}
         <span class="people__when"><span aria-hidden="true">${iconOf(p.kind)}</span><span class="visually-hidden">${KIND_LABEL[p.kind] ?? "Birthday"}:</span> ${formatBirthday(p)} · ${nextLabel(r)}</span>
-        <button type="submit" name="send" value="${p.id}" class="button button--quiet button--small people__send" data-confirm="${sendNowConfirm}">Send now</button>
+        <span class="people__actions">
+          <button type="submit" name="send" value="${p.id}" class="button button--quiet button--small" data-confirm="${sendNowConfirm}">Send now</button>
+          <button type="submit" name="delete" value="${p.id}" class="button button--danger-quiet button--small" data-confirm="Delete ${p.name}’s ${occasionWord(p.kind)} (${formatBirthday(p)}) from the list? Their wish won’t be sent. Other changes in the table are saved first.">Delete</button>
+        </span>
       </td>
       <td data-label="WhatsApp number">
         <input name="phone_${p.id}" value="${v.phone}" inputmode="tel" autocomplete="off" placeholder="+91 98765 43210" aria-label="WhatsApp number for ${p.name}"${invalid(e.phone)}>
@@ -543,8 +546,8 @@ ${editing
     <button type="submit" class="button button--quiet">Send me a preview</button>
   </form>
   <span class="hint">Both send the saved message. A preview goes to ${previewTo}.</span>
-  <form method="post" action="/people/${person.id}/delete" class="inline-form person-extras__remove" data-confirm="Remove ${person.name} from the list? What was sent to them stays in Recent messages.">
-    <button type="submit" class="button button--danger">Remove from the list</button>
+  <form method="post" action="/people/${person.id}/delete" class="inline-form person-extras__remove" data-confirm="Delete ${person.name}’s ${occasionWord(person.kind)} from the list? Their wish won’t be sent. What was sent before stays in Recent messages.">
+    <button type="submit" class="button button--danger">Delete from the list</button>
   </form>
 </div>`
   : ""}`,

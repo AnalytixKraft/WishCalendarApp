@@ -11,6 +11,7 @@ import { renderSVG } from "uqr";
 import { COOKIE, MAX_AGE_S, MAX_PASSWORD, MIN_PASSWORD, createAuth, createThrottle } from "./auth.mjs";
 import { parsePeople } from "./csv.mjs";
 import {
+  MONTHS,
   ageOn,
   daysInMonth,
   isBirthdayOn,
@@ -390,6 +391,19 @@ export async function createApp({ config, problems = [], db, bridge, scheduler, 
     }
     db.people.updateMany(rows);
 
+    // A row's "Delete" submits the whole table too: saved first, then that
+    // row goes.
+    const deleteId = Number(form.get("delete"));
+    if (deleteId) {
+      const person = db.people.get(deleteId);
+      if (person) db.people.remove(person.id);
+      return ctx.back(
+        "/people",
+        "ok",
+        person ? `Deleted ${person.name}’s ${person.kind} (${person.day} ${MONTHS[person.month - 1]}).` : "Already deleted.",
+      );
+    }
+
     // A row's "Send now" submits the whole table: saved first, then sent.
     const sendId = Number(form.get("send"));
     if (sendId) {
@@ -490,7 +504,7 @@ export async function createApp({ config, problems = [], db, bridge, scheduler, 
     await readForm(ctx.req);
     const person = db.people.get(Number(match[1]));
     if (person) db.people.remove(person.id);
-    ctx.back("/people", "ok", person ? `Removed ${person.name} from the list.` : "Already removed.");
+    ctx.back("/people", "ok", person ? `Deleted ${person.name}’s ${person.kind}.` : "Already deleted.");
   }
 
   function importForm(ctx) {

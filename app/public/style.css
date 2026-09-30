@@ -642,7 +642,7 @@ fieldset .check { margin-top: 6px; }
 .people th:nth-child(3) { width: 19%; }
 .people th:nth-child(4) { width: 11%; }
 .th-note { display: block; margin-top: 2px; font-weight: 500; letter-spacing: 0.02em; text-transform: none; }
-.people__send { margin-top: 8px; }
+.people__actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .people input[type="time"] { min-width: 0; }
 .people td { vertical-align: top; padding-top: 10px; padding-bottom: 10px; }
 .people input, .people select, .people textarea { padding: 7px 9px; font-size: 0.92rem; }
