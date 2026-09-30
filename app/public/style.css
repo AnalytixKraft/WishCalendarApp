@@ -594,19 +594,7 @@ fieldset .check { margin-top: 6px; }
 .chip--today { background: var(--marigold); color: #1b2040; }
 .chip--muted { background: transparent; box-shadow: inset 0 0 0 1px var(--rule); color: var(--ink-soft); font-weight: 550; }
 
-/* --------------------------------------------------------------- groups */
-
-.group__head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 16px; margin-bottom: 14px; }
-.group__head h2 { margin: 0; font-size: 1.25rem; }
-.group__head p { margin: 0; }
-.group__more {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-top: 18px;
-  padding-top: 16px;
-  border-top: 1px solid var(--rule);
-}
+/* --------------------------------------------------- the wish preview */
 
 .preview { display: grid; gap: 8px; }
 .preview .eyebrow { margin: 0; }
@@ -634,18 +622,112 @@ fieldset .check { margin-top: 6px; }
   border-right: 8px solid transparent;
 }
 
-.pick { list-style: none; margin: 0 0 16px; padding: 0; }
-.pick li {
+/* ------------------------------------------------------ the People table */
+
+/* clip, not hidden: hidden would make the card the scroll box, and the Save
+ * bar below could no longer stick to the bottom of the window. */
+.card--flush { overflow: clip; }
+
+.table-tools {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 8px 16px;
-  padding: 12px 0;
-  border-top: 1px solid var(--rule);
+  gap: 10px 20px;
 }
-.pick li:first-child { border-top: 0; padding-top: 0; }
-.pick__actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.people { table-layout: fixed; }
+.people th:nth-child(1) { width: 23%; }
+.people th:nth-child(2) { width: 16%; }
+.people th:nth-child(3) { width: 19%; }
+.people th:nth-child(4) { width: 11%; }
+.th-note { display: block; margin-top: 2px; font-weight: 500; letter-spacing: 0.02em; text-transform: none; }
+.people__send { margin-top: 8px; }
+.people input[type="time"] { min-width: 0; }
+.people td { vertical-align: top; padding-top: 10px; padding-bottom: 10px; }
+.people input, .people select, .people textarea { padding: 7px 9px; font-size: 0.92rem; }
+.people textarea { min-height: 2.6rem; }
+.people__who a { font-weight: 650; }
+.people__when { display: block; margin-top: 4px; font-size: 0.85rem; color: var(--ink-soft); }
+.people__when .chip { font-size: 0.76rem; }
+.people .field__error { display: block; margin-top: 4px; font-size: 0.84rem; }
+.people tr.is-invalid td { background: color-mix(in srgb, var(--danger) 6%, transparent); }
+
+.people-form__actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 18px;
+  padding: 14px 16px;
+  background: var(--paper);
+  border-top: 1px solid var(--rule);
+  box-shadow: 0 -8px 16px -12px rgb(27 32 64 / 0.25);
+}
+
+/* A phone: each person becomes a small card, each field with its label. */
+@media (max-width: 760px) {
+  .people, .people tbody, .people tr, .people td { display: block; width: auto; }
+  .people thead { display: none; }
+  .people tr { padding: 14px 16px; border-bottom: 1px solid var(--rule); }
+  .people td { padding: 6px 0; border: 0; }
+  .people td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 4px;
+    font-size: 0.74rem;
+    font-weight: 700;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+  .card:not(.card--flush) .people td:first-child { padding-left: 0; }
+}
+
+/* The default messages: a panel on People, a pair on Settings. */
+.defaults { padding: 0; }
+.defaults > summary {
+  cursor: pointer;
+  padding: 16px 22px;
+  list-style-position: inside;
+}
+.defaults[open] > summary { border-bottom: 1px solid var(--rule); }
+.defaults__form { padding: 18px 22px 20px; }
+.defaults__pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+
+/* Birthday or anniversary, on a person's page. */
+.kinds { display: flex; flex-wrap: wrap; gap: 8px 22px; }
+.kinds .check { margin: 0; }
+.kinds input[type="radio"] { width: 1.1rem; height: 1.1rem; accent-color: var(--ink); margin: 0.2rem 0 0; }
+
+.person-extras { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin-top: 8px; }
+.person-extras__remove { margin-left: auto; }
+
+.settings-title {
+  margin: 0 0 14px;
+  font: 700 1.05rem/1 var(--font-display);
+  font-stretch: condensed;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+.wa-changed { margin: 14px 0 0; }
+
+.settings-group { border: 0; margin: 0; padding: 0; display: grid; gap: 16px; min-width: 0; }
+.settings-group legend {
+  padding: 0;
+  margin-bottom: 14px;
+  font: 700 1.05rem/1 var(--font-display);
+  font-stretch: condensed;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+.settings-group + .settings-group { padding-top: 18px; border-top: 1px solid var(--rule); }
+
+.arrow { color: var(--ink-soft); margin: 0 2px; }
 
 /* ------------------------------------------------------------- whatsapp */
 

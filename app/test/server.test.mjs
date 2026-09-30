@@ -123,9 +123,140 @@ test("an import adds people and says which lines need fixing", async () => {
   const res = await post("/people/import", { list: "Name\tBirthday\nAnu Joseph\t30-09-1996\nBiju\t09-30\nAnu Joseph\t30/09" }, { cookie });
   assert.equal(res.status, 422);
   const page = await res.text();
-  assert.match(page, /1 person added/);
-  assert.match(page, /1 was already on the list/);
+  assert.match(page, /Added 1 birthday and 0 anniversaries/);
+  assert.match(page, /1 already on the list was skipped/);
   assert.match(page, /Line 3: Biju/);
+});
+
+test("the People table saves numbers, destinations and messages — all or nothing", async () => {
+  const cookie = await signIn();
+  const a = db.people.create({ name: "Table A", day: 3, month: 3 });
+  const b = db.people.create({ name: "Table B", day: 4, month: 4 });
+  const rows = (bPhone) => [
+    ["id", String(a)], [`phone_${a}`, "98765 43210"], [`send_to_${a}`, "direct"], [`message_${a}`, "Happy birthday, {first_name}!"],
+    ["id", String(b)], [`phone_${b}`, bPhone], [`send_to_${b}`, "direct"], [`message_${b}`, ""],
+  ];
+
+  const refused = await post("/people/save", rows("12"), { cookie });
+  assert.equal(refused.status, 422);
+  const page = await refused.text();
+  assert.match(page, /“12” is not a phone number/);
+  assert.match(page, /value="98765 43210"/); // what was typed stays on the page
+  assert.equal(db.people.get(a).sendTo, ""); // nothing saved
+
+  const noNumber = await post("/people/save", rows(""), { cookie });
+  assert.equal(noNumber.status, 422);
+  assert.match(await noNumber.text(), /Add their WhatsApp number first/);
+
+  const saved = await post("/people/save", rows("+91 98765 00000"), { cookie });
+  assert.equal(saved.status, 303);
+  assert.deepEqual([db.people.get(a).phone, db.people.get(a).sendTo, db.people.get(a).message], ["919876543210", "direct", "Happy birthday, {first_name}!"]);
+  assert.equal(db.people.get(b).phone, "919876500000");
+});
+
+test("a row's Send now saves the table first, then says why it could not send", async () => {
+  const cookie = await signIn();
+  const id = db.people.create({ name: "Row Sender", day: 5, month: 5, sendTo: "120363000000000009@g.us" });
+  const res = await post(
+    "/people/save",
+    [["id", String(id)], [`phone_${id}`, ""], [`send_to_${id}`, "120363000000000009@g.us"], [`time_${id}`, "21:15"], [`message_${id}`, "Hi"], ["send", String(id)]],
+    { cookie },
+  );
+  assert.equal(res.status, 303);
+  assert.deepEqual([db.people.get(id).sendTime, db.people.get(id).message], ["21:15", "Hi"]);
+  const flash = JSON.parse(Buffer.from(/bdr_flash=([^;]+)/.exec(res.headers.get("set-cookie"))[1], "base64url").toString());
+  assert.equal(flash.type, "error");
+  assert.match(flash.text, /Saved, but Row Sender’s wish was not sent: WhatsApp is not connected/);
+
+  const badTime = await post("/people/save", [["id", String(id)], [`time_${id}`, "25:00"], [`send_to_${id}`, ""]], { cookie });
+  assert.equal(badTime.status, 422);
+  assert.match(await badTime.text(), /Enter a time like 09:30/);
+});
+
+test("an anniversary is added from its own link, and a duplicate is refused", async () => {
+  const cookie = await signIn();
+  const form = await (await get("/people/new?kind=anniversary", cookie)).text();
+  assert.match(form, /<h1>Add anniversary<\/h1>/);
+  assert.match(form, /value="anniversary" data-kind-for="wish-preview" checked/);
+  const fields = { kind: "anniversary", name: "Joseph & Mary", day: "15", month: "5", year: "1995", active: "1" };
+  assert.equal((await post("/people", fields, { cookie })).status, 303);
+  const person = db.people.all().find((p) => p.name === "Joseph & Mary");
+  assert.equal(person.kind, "anniversary");
+  const again = await post("/people", fields, { cookie });
+  assert.equal(again.status, 422);
+  assert.match(await again.text(), /already on the list with this anniversary/);
+  assert.equal((await post("/people", { ...fields, kind: "birthday" }, { cookie })).status, 303, "a birthday on the same date is another occasion");
+});
+
+test("the default messages can be edited from the People page", async () => {
+  const cookie = await signIn();
+  const res = await post("/settings/messages", { template: "Happy birthday, {first_name}!", anniversaryTemplate: "" }, { cookie });
+  assert.equal(res.status, 303);
+  assert.equal(res.headers.get("location"), "/people?defaults#default-messages");
+  assert.equal(db.settings.get().template, "Happy birthday, {first_name}!");
+  assert.match(db.settings.get().anniversaryTemplate, /^💍 Happy anniversary/, "empty restores the original");
+  const page = await (await get("/people?defaults", cookie)).text();
+  assert.match(page, /<details class="card defaults" id="default-messages" open>/);
+  // Each row's empty message offers the default with the person's name in.
+  const id = db.people.create({ name: "Vivek Paul", day: 8, month: 8 });
+  const table = await (await get("/people", cookie)).text();
+  assert.match(table, new RegExp(`name="message_${id}"[^>]*data-default-message="Happy birthday, Vivek!"`));
+});
+
+test("WhatsApp lives in Settings now; the app is called Wish Calendar", async () => {
+  const cookie = await signIn();
+  const old = await get("/whatsapp", cookie);
+  assert.equal(old.status, 303);
+  assert.equal(old.headers.get("location"), "/settings#whatsapp");
+  const page = await (await get("/settings", cookie)).text();
+  assert.match(page, /<title>Settings · Wish Calendar<\/title>/);
+  assert.match(page, /<section class="card whatsapp" id="whatsapp" data-wa-state="idle"/);
+  assert.match(page, /Link a phone/);
+  assert.doesNotMatch(page, /href="\/whatsapp"/, "no menu entry for a WhatsApp page");
+});
+
+test("Change password: the current one first; then the old sessions and the old password are over", async () => {
+  const flashOf = (res) => JSON.parse(Buffer.from(/bdr_flash=([^;]+)/.exec(res.headers.getSetCookie().find((c) => c.startsWith("bdr_flash=")))[1], "base64url").toString()).text;
+  const before = await signIn();
+  const change = (fields, address = "10.0.0.50") => post("/settings/password", fields, { cookie: before, address });
+
+  assert.match(flashOf(await change({ current: "wrong", next: "brand new one", again: "brand new one" })), /current password is not right/);
+  assert.match(flashOf(await change({ current: PASSWORD, next: "short", again: "short" })), /needs 8 to 200 characters/);
+  assert.match(flashOf(await change({ current: PASSWORD, next: "brand new one", again: "brand new two" })), /not the same/);
+  assert.equal(db.password.hash(), null, "nothing changed so far");
+
+  const done = await change({ current: PASSWORD, next: "brand new one", again: "brand new one" });
+  assert.equal(done.status, 303);
+  assert.match(flashOf(done), /Password changed. Every other browser is signed out./);
+  const after = done.headers.getSetCookie().find((c) => c.startsWith("bdr_session=")).split(";")[0];
+  assert.match(db.password.hash(), /^scrypt:/);
+
+  assert.equal((await get("/", before)).status, 303, "the old session is signed out");
+  assert.equal((await get("/", after)).status, 200, "this browser stays signed in");
+  assert.equal((await post("/login", { password: PASSWORD }, { address: "10.0.0.51" })).status, 401);
+  assert.equal((await post("/login", { password: "brand new one" }, { address: "10.0.0.51" })).status, 303);
+
+  db.password.clear(); // what scripts/reset-password.sh does
+  assert.equal((await get("/", after)).status, 303);
+  assert.equal((await post("/login", { password: PASSWORD }, { address: "10.0.0.51" })).status, 303);
+});
+
+test("Settings says plainly what the sending switch does", async () => {
+  const page = await (await get("/settings", await signIn())).text();
+  assert.match(page, /Send wishes and reminders automatically/);
+  assert.match(page, /Unticked, the app pauses/);
+  assert.match(page, /<section class="card" id="password"/);
+});
+
+test("the reminder to my number needs my number", async () => {
+  const cookie = await signIn();
+  const base = { wishTime: "08:00", reminderTime: "07:00", timezone: "Asia/Kolkata", daysAhead: "1", countryCode: "91", template: "" };
+  const refused = await post("/settings", { ...base, reminderTo: "direct", myPhone: "" }, { cookie });
+  assert.equal(refused.status, 422);
+  assert.match(await refused.text(), /Add your WhatsApp number first/);
+  const saved = await post("/settings", { ...base, reminderTo: "direct", myPhone: "98765 11111" }, { cookie });
+  assert.equal(saved.status, 303);
+  assert.deepEqual([db.settings.get().reminderTo, db.settings.get().myPhone], ["direct", "919876511111"]);
 });
 
 test("the stylesheet is cached for good only at its hashed address", async () => {

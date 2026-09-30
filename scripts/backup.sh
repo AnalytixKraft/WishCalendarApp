@@ -7,7 +7,7 @@
 #   bash scripts/backup.sh
 #
 # The WhatsApp link is NOT in it, on purpose: it is a live credential for the
-# account. After a restore, link the phone again on the WhatsApp page.
+# account. After a restore, link the phone again in Settings → WhatsApp.
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."

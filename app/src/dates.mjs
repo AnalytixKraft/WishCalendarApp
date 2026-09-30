@@ -88,6 +88,16 @@ export function nextBirthday(person, from) {
   return { date, inDays: serial(date) - serial(from) };
 }
 
+/* The celebration nearest `from`, before or after it — for a wish sent on
+ * another day than the birthday: early, or late. inDays is negative for one
+ * that has passed. */
+export function nearestBirthday(person, from) {
+  const next = nextBirthday(person, from);
+  const previous = celebrationDate(person, next.date.year - 1);
+  const back = serial(from) - serial(previous);
+  return back < next.inDays ? { date: previous, inDays: -back } : next;
+}
+
 /* The age a person turns on `date`, their celebration day — or null when the
  * birth year is not known (or is not before `date`). */
 export function ageOn(person, date) {
