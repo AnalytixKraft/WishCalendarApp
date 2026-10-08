@@ -308,6 +308,7 @@ fieldset .check { margin-top: 6px; }
 .hint-list li + li { margin-top: 4px; }
 
 .form__actions { display: flex; align-items: center; gap: 18px; }
+.form__actions > .button { flex: none; }
 
 .danger-zone { margin-top: 8px; }
 
@@ -728,6 +729,144 @@ fieldset .check { margin-top: 6px; }
 .settings-group + .settings-group { padding-top: 18px; border-top: 1px solid var(--rule); }
 
 .arrow { color: var(--ink-soft); margin: 0 2px; }
+
+/* ------------------------------------------------------------- notebook */
+
+/* Lined paper with a margin, for writing: the journal, and today's page. */
+.ruled {
+  --line: 1.75rem;
+  line-height: var(--line);
+  padding: 2px 14px 2px 3rem;
+  background:
+    linear-gradient(90deg, transparent 2.2rem, color-mix(in srgb, var(--sunday) 35%, transparent) 2.2rem 2.3rem, transparent 2.3rem),
+    linear-gradient(transparent calc(var(--line) - 1px), color-mix(in srgb, var(--ballpoint) 16%, transparent) 0) 0 2px / 100% var(--line),
+    var(--paper);
+  background-attachment: local;
+}
+
+.notes-search { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin-bottom: 14px; }
+.notes-search input { flex: 1 1 12rem; max-width: 34rem; }
+
+.tag { color: var(--ballpoint); text-decoration: none; font-weight: 600; }
+.tag:hover { text-decoration: underline; }
+.tags { display: flex; flex-wrap: wrap; gap: 6px 8px; margin: 0 0 22px; }
+.tags .tag {
+  padding: 3px 11px;
+  border-radius: 999px;
+  background: var(--paper);
+  box-shadow: inset 0 0 0 1px var(--rule);
+  font-size: 0.88rem;
+  white-space: nowrap;
+}
+.tags .tag:hover { text-decoration: none; box-shadow: inset 0 0 0 1.5px var(--ballpoint); }
+.tags .tag.is-current { background: var(--ballpoint); color: var(--paper); box-shadow: none; }
+.tag__count { color: var(--ink-soft); font-weight: 500; margin-left: 2px; }
+.tag.is-current .tag__count { color: inherit; opacity: 0.75; }
+
+.notes__heading { margin: 4px 0 14px; }
+.notes {
+  list-style: none;
+  margin: 0 0 20px;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 16px;
+}
+
+/* A note in a list: an index card. The whole card opens it; its tags still
+ * open their own lists. */
+.note-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 16px 18px 14px;
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  box-shadow: var(--lift);
+  transition: transform 120ms ease;
+}
+.note-card:hover { transform: translateY(-2px); }
+.note-card.is-pinned { box-shadow: inset 0 4px 0 var(--marigold), var(--lift); }
+.note-card--journal { border-left: 3px solid color-mix(in srgb, var(--sunday) 45%, transparent); }
+.note-card__title { margin: 0; font-size: 1.02rem; font-weight: 650; overflow-wrap: anywhere; }
+.note-card__title a { color: var(--ink); text-decoration: none; }
+.note-card__title a::after { content: ""; position: absolute; inset: 0; border-radius: inherit; }
+.note-card__text {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.93rem;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  overflow: hidden;
+}
+.note-card__meta { margin: auto 0 0; padding-top: 6px; font-size: 0.82rem; color: var(--ink-soft); }
+.note-card__meta .tag { position: relative; z-index: 1; }
+.note-card__pin { font-weight: 650; color: var(--ink); }
+
+mark { background: var(--marigold-wash); color: inherit; border-radius: 3px; padding: 0 2px; box-shadow: inset 0 -2px 0 var(--marigold); }
+
+/* A note's own page. */
+.note { padding: 26px 30px 30px; }
+.note__title {
+  font: 650 1.65rem/1.25 var(--font-body);
+  font-stretch: normal;
+  letter-spacing: 0;
+  text-transform: none;
+  margin: 0 0 6px;
+  overflow-wrap: anywhere;
+}
+.note__meta { color: var(--ink-soft); font-size: 0.9rem; margin: 0 0 20px; }
+.note__body { max-width: 72ch; font-size: 1.03rem; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+.note-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }
+.note-actions__remove { margin-left: auto; }
+.note-input { min-height: 18rem; line-height: 1.6; }
+
+/* The journal: the day's leaf, its page, and the latest pages. */
+.day-nav { display: flex; flex-wrap: wrap; gap: 8px; }
+.journal {
+  display: grid;
+  grid-template-columns: 170px minmax(0, 1fr) 220px;
+  gap: 28px;
+  align-items: start;
+  margin-bottom: 20px;
+}
+.journal__leaf { padding-top: 6px; }
+.journal__page { margin: 0; }
+.journal__page .ruled { min-height: 28rem; }
+.journal__pages ul { list-style: none; margin: 0; padding: 0; }
+.journal__pages li { display: grid; gap: 1px; padding: 8px 0; border-top: 1px solid var(--rule); font-size: 0.92rem; }
+.journal__pages li:first-child { border-top: 0; padding-top: 0; }
+.journal__pages li[aria-current] a { color: var(--ink); text-decoration: none; font-weight: 650; }
+.journal__pages .muted { font-size: 0.84rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 980px) {
+  .journal { grid-template-columns: 150px minmax(0, 1fr); }
+  .journal__pages { grid-column: 1 / -1; }
+}
+@media (max-width: 640px) {
+  .journal { grid-template-columns: 1fr; gap: 22px; }
+  .journal__page .ruled { min-height: 18rem; }
+  /* On a phone the writing comes first; the date is in the heading. */
+  .journal__leaf { order: 1; }
+  .journal__pages { order: 2; }
+}
+
+.journal-card__form { gap: 12px; }
+.journal-card .ruled { min-height: calc(4 * 1.75rem + 4px); }
+
+.person-notes { margin-top: 20px; }
+.person-notes__list { margin: 0 0 14px; padding-left: 1.2em; }
+.person-notes__list li + li { margin-top: 4px; }
+.person-notes p:last-child { margin: 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  .note-card { transition: none; }
+  .note-card:hover { transform: none; }
+}
 
 /* ------------------------------------------------------------- whatsapp */
 

@@ -7,6 +7,7 @@
 
 import { DatabaseSync } from "node:sqlite";
 import { DEFAULT_ANNIVERSARY_TEMPLATE, DEFAULT_TEMPLATE } from "./messages.mjs";
+import { tagsOf } from "./notes.mjs";
 
 const NOW = "strftime('%Y-%m-%dT%H:%M:%SZ', 'now')";
 
@@ -138,6 +139,43 @@ const MIGRATIONS = [
   CREATE INDEX deliveries_by_day ON deliveries (day);
   CREATE INDEX deliveries_by_update ON deliveries (updated_at);
   `,
+
+  // 6 — the notebook. A note, or a journal page: one per day, `day` is
+  // 'YYYY-MM-DD'. A note can be about someone on the list; when they are
+  // deleted, the note stays. tags are the #words in the text (notes.mjs,
+  // tagsOf), lowercase and space-separated. notes_fts is the search index,
+  // kept in step by the triggers below.
+  `
+  CREATE TABLE notes (
+    id         INTEGER PRIMARY KEY,
+    kind       TEXT    NOT NULL DEFAULT 'note' CHECK (kind IN ('note', 'journal')),
+    day        TEXT    CHECK (day IS NULL OR day GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+    title      TEXT    NOT NULL DEFAULT '',
+    body       TEXT    NOT NULL DEFAULT '',
+    tags       TEXT    NOT NULL DEFAULT '',
+    pinned     INTEGER NOT NULL DEFAULT 0,
+    person_id  INTEGER REFERENCES people(id) ON DELETE SET NULL,
+    created_at TEXT    NOT NULL DEFAULT (${NOW}),
+    updated_at TEXT    NOT NULL DEFAULT (${NOW}),
+    CHECK ((kind = 'journal') = (day IS NOT NULL))
+  );
+  CREATE UNIQUE INDEX notes_journal_day ON notes (day) WHERE kind = 'journal';
+  CREATE INDEX notes_by_person ON notes (person_id) WHERE person_id IS NOT NULL;
+
+  CREATE VIRTUAL TABLE notes_fts USING fts5(
+    title, body, content = 'notes', content_rowid = 'id', tokenize = 'unicode61 remove_diacritics 2'
+  );
+  CREATE TRIGGER notes_fts_insert AFTER INSERT ON notes BEGIN
+    INSERT INTO notes_fts (rowid, title, body) VALUES (new.id, new.title, new.body);
+  END;
+  CREATE TRIGGER notes_fts_delete AFTER DELETE ON notes BEGIN
+    INSERT INTO notes_fts (notes_fts, rowid, title, body) VALUES ('delete', old.id, old.title, old.body);
+  END;
+  CREATE TRIGGER notes_fts_update AFTER UPDATE OF title, body ON notes BEGIN
+    INSERT INTO notes_fts (notes_fts, rowid, title, body) VALUES ('delete', old.id, old.title, old.body);
+    INSERT INTO notes_fts (rowid, title, body) VALUES (new.id, new.title, new.body);
+  END;
+  `,
 ];
 
 function migrate(db) {
@@ -174,6 +212,26 @@ const person = (r) =>
       }
     : null;
 const delivery = (r) => (r ? { ...r } : null);
+/* A note or a journal page. body is the whole text, from get(); a list has
+ * the start of it as preview, and a search the matching part as snippet
+ * (the words found between \u0001 and \u0002). */
+const note = (r) =>
+  r
+    ? {
+        id: r.id,
+        kind: r.kind,
+        day: r.day,
+        title: r.title,
+        body: r.body,
+        preview: r.preview,
+        snippet: r.snippet,
+        tags: r.tags ? r.tags.split(" ") : [],
+        pinned: r.pinned === 1,
+        person: r.person_id ? { id: r.person_id, name: r.person_name, kind: r.person_kind } : null,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at,
+      }
+    : null;
 
 export function openDb(file, { defaultTimezone = "Asia/Kolkata" } = {}) {
   const db = new DatabaseSync(file);
@@ -385,5 +443,84 @@ export function openDb(file, { defaultTimezone = "Asia/Kolkata" } = {}) {
       q("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(CHECKED_THROUGH, day),
   };
 
-  return { people, chats, settings, password, deliveries, alerts, transaction, close: () => db.close() };
+  /* The notebook: notes, and the journal's pages (one a day). */
+  const NOTE = `n.id, n.kind, n.day, n.title, n.tags, n.pinned, n.person_id, n.created_at, n.updated_at,
+    p.name AS person_name, p.kind AS person_kind`;
+  const NOTES = "notes n LEFT JOIN people p ON p.id = n.person_id";
+  const NEWEST = "n.pinned DESC, n.updated_at DESC, n.id DESC";
+  const tagsFor = (...texts) => tagsOf(texts.join("\n")).join(" ");
+
+  const notes = {
+    get: (id) => note(q(`SELECT ${NOTE}, n.body FROM ${NOTES} WHERE n.id = ? AND n.kind = 'note'`).get(id)),
+    /* Pinned first, then the latest edited. Notes only — with a tag, the
+     * journal pages that have it too. */
+    list: ({ tag = null, limit = 200 } = {}) =>
+      (tag
+        ? q(`SELECT ${NOTE}, substr(n.body, 1, 400) AS preview FROM ${NOTES} WHERE instr(' ' || n.tags || ' ', ?) > 0 ORDER BY ${NEWEST} LIMIT ?`).all(` ${tag} `, limit)
+        : q(`SELECT ${NOTE}, substr(n.body, 1, 400) AS preview FROM ${NOTES} WHERE n.kind = 'note' ORDER BY ${NEWEST} LIMIT ?`).all(limit)
+      ).map(note),
+    count: () => q("SELECT COUNT(*) AS n FROM notes WHERE kind = 'note'").get().n,
+    forPerson: (personId) =>
+      q(`SELECT ${NOTE}, substr(n.body, 1, 400) AS preview FROM ${NOTES} WHERE n.person_id = ? AND n.kind = 'note' ORDER BY ${NEWEST}`)
+        .all(personId)
+        .map(note),
+    /* Notes and journal pages with every word of `query` — an FTS5 query
+     * from notes.mjs (searchQuery), never what was typed — best match first,
+     * a title counting for more than the text. */
+    search: (query, limit = 50) =>
+      query
+        ? q(
+            `SELECT ${NOTE}, substr(n.body, 1, 400) AS preview, snippet(notes_fts, -1, char(1), char(2), '…', 24) AS snippet
+             FROM notes_fts JOIN notes n ON n.id = notes_fts.rowid LEFT JOIN people p ON p.id = n.person_id
+             WHERE notes_fts MATCH ? ORDER BY bm25(notes_fts, 4.0, 1.0), n.updated_at DESC LIMIT ?`,
+          )
+            .all(query, limit)
+            .map(note)
+        : [],
+    /* Every tag in use, most used first. */
+    tags() {
+      const counts = new Map();
+      for (const { tags } of q("SELECT tags FROM notes WHERE tags <> ''").all()) {
+        for (const tag of tags.split(" ")) counts.set(tag, (counts.get(tag) ?? 0) + 1);
+      }
+      return [...counts].map(([tag, count]) => ({ tag, count })).sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
+    },
+    create: ({ title = "", body = "", pinned = false, personId = null }) =>
+      Number(
+        q("INSERT INTO notes (title, body, tags, pinned, person_id) VALUES (?, ?, ?, ?, ?)").run(title, body, tagsFor(title, body), pinned ? 1 : 0, personId)
+          .lastInsertRowid,
+      ),
+    update: (id, { title = "", body = "", pinned = false, personId = null }) =>
+      q(`UPDATE notes SET title = ?, body = ?, tags = ?, pinned = ?, person_id = ?, updated_at = ${NOW} WHERE id = ? AND kind = 'note'`).run(
+        title,
+        body,
+        tagsFor(title, body),
+        pinned ? 1 : 0,
+        personId,
+        id,
+      ).changes > 0,
+    /* Pinning is not an edit: the note keeps its place among the others. */
+    setPinned: (id, pinned) => q("UPDATE notes SET pinned = ? WHERE id = ? AND kind = 'note'").run(pinned ? 1 : 0, id).changes > 0,
+    remove: (id) => q("DELETE FROM notes WHERE id = ? AND kind = 'note'").run(id).changes > 0,
+  };
+
+  const journal = {
+    get: (day) => note(q(`SELECT ${NOTE}, n.body FROM ${NOTES} WHERE n.kind = 'journal' AND n.day = ?`).get(day)),
+    /* Writes the day's page. A page saved empty is no page. */
+    save: (day, body) =>
+      body.trim()
+        ? q(
+            `INSERT INTO notes (kind, day, body, tags) VALUES ('journal', ?, ?, ?)
+             ON CONFLICT (day) WHERE kind = 'journal' DO UPDATE SET body = excluded.body, tags = excluded.tags, updated_at = ${NOW}`,
+          ).run(day, body, tagsFor(body))
+        : q("DELETE FROM notes WHERE kind = 'journal' AND day = ?").run(day),
+    /* The latest pages, by their day. */
+    recent: (limit = 14) =>
+      q(`SELECT ${NOTE}, substr(n.body, 1, 160) AS preview FROM ${NOTES} WHERE n.kind = 'journal' ORDER BY n.day DESC LIMIT ?`)
+        .all(limit)
+        .map(note),
+    count: () => q("SELECT COUNT(*) AS n FROM notes WHERE kind = 'journal'").get().n,
+  };
+
+  return { people, chats, settings, password, deliveries, alerts, notes, journal, transaction, close: () => db.close() };
 }

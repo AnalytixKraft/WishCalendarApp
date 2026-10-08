@@ -118,3 +118,54 @@ test("migration 5 keeps what was sent, and makes room for alerts", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("migration 6 adds the notebook: notes, journal pages, tags and search", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bdr-"));
+  try {
+    const file = join(dir, "birthdays.db");
+    firstVersionDb(file);
+    const db = openDb(file);
+    assert.equal(db.people.count(), 3, "the list is kept");
+
+    const gift = db.notes.create({ title: "Gift ideas", body: "A fountain pen for Anu #Gifts", personId: 1, pinned: true });
+    const dentist = db.notes.create({ body: "Dentist on Tuesday #health" });
+    assert.deepEqual(db.notes.get(gift).tags, ["gifts"]);
+    assert.deepEqual(db.notes.get(gift).person, { id: 1, name: "Anu", kind: "birthday" });
+    assert.deepEqual(db.notes.list().map((n) => n.id), [gift, dentist], "pinned first");
+
+    // Search follows every change: a new word is found, an old one is not.
+    const found = (words) => db.notes.search(words.split(" ").map((w) => `"${w}"*`).join(" ")).map((n) => n.id);
+    assert.deepEqual(found("dent"), [dentist]);
+    db.notes.update(dentist, { body: "Physio on Tuesday #health" });
+    assert.deepEqual(found("dent"), []);
+    assert.deepEqual(found("physio tues"), [dentist]);
+    assert.match(db.notes.search('"physio"*')[0].snippet, /\u0001Physio\u0002 on Tuesday/);
+
+    // One journal page a day; saved again, it is the same page; saved empty, it goes.
+    db.journal.save("2026-10-08", "Walked by the lake #health");
+    db.journal.save("2026-10-08", "Walked by the lake, then the café #health");
+    assert.equal(db.journal.count(), 1);
+    assert.deepEqual(found("cafe"), [db.journal.get("2026-10-08").id], "accents do not matter");
+    assert.deepEqual(db.notes.list({ tag: "health" }).map((n) => n.kind).sort(), ["journal", "note"], "a tag finds both");
+    assert.deepEqual(db.notes.list().map((n) => n.kind), ["note", "note"], "the plain list is notes only");
+    assert.deepEqual(db.notes.tags(), [{ tag: "health", count: 2 }, { tag: "gifts", count: 1 }]);
+    db.journal.save("2026-10-08", "  \n ");
+    assert.equal(db.journal.get("2026-10-08"), null);
+    assert.deepEqual(found("lake"), []);
+
+    // Deleting the person keeps the note about them.
+    db.people.remove(1);
+    assert.equal(db.notes.get(gift).person, null);
+    assert.equal(db.notes.get(gift).title, "Gift ideas");
+
+    // Pinning is not an edit; deleting takes the note out of search too.
+    const edited = db.notes.get(gift).updatedAt;
+    db.notes.setPinned(gift, false);
+    assert.equal(db.notes.get(gift).updatedAt, edited);
+    assert.equal(db.notes.remove(gift), true);
+    assert.deepEqual(found("fountain"), []);
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

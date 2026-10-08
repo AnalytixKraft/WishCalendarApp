@@ -8,6 +8,8 @@ Keep the list in the app: 🎂 birthdays, and 💍 anniversaries (a couple's wed
 - sends **each wish** at its time, to where its row says, and
 - **tells you when a wish was not sent**, which one and why, so none is missed quietly.
 
+It is your notebook too: [notes and a journal page for each day](#notes-and-the-journal), with #tags and search, kept on the same computer and never sent anywhere.
+
 It runs on a computer that stays on — a Mac, directly, with nothing but Node; or any computer with Docker — and you use it in the browser at `http://localhost:3210`.
 
 > [!WARNING]
@@ -22,7 +24,7 @@ It runs on a computer that stays on — a Mac, directly, with nothing but Node; 
                        SQLite database    and to people's numbers
 ```
 
-- **`app/`** — the pages, the database (people, settings, what was sent — one SQLite file) and the clock that sends each day's messages. Node 24, no framework, SQLite built in.
+- **`app/`** — the pages, the database (people, settings, what was sent, your notes — one SQLite file) and the clock that sends each day's messages. Node 24, no framework, SQLite built in.
 - **`whatsapp/`** — the bridge: holds the WhatsApp session and does one thing with it — send text to a group it is in, or to a person's number. Only this computer (or, in Docker, only the app) can reach it, and only with the token. It only messages numbers that are on WhatsApp, at most 30 direct messages an hour, and ignores messages from strangers. See [`whatsapp/README.md`](whatsapp/README.md).
 
 Two ways to run the pair: **on a Mac, directly** — two small Node programs that macOS's launchd starts when you sign in and restarts if they stop — or **in Docker**, on any computer (plus an optional Cloudflare tunnel; see [Reach it from anywhere](#reach-it-from-anywhere)).
@@ -166,6 +168,19 @@ bash scripts/reset-password.sh
 
 That removes the password set in Settings, so `ADMIN_PASSWORD` from `.env` works again.
 
+## Notes and the journal
+
+**Notes** is your notebook.
+
+- **A note** is anything you write down: a list, an idea, something to remember. Without a title, its first line is its title. Pin the ones you want on top.
+- **#tags**: write `#gifts` or `#health` anywhere in a note and the tag shows above your notes; click it for every note and journal page that has it. A tag starts with a letter, in any language.
+- **About someone**: a note can be about someone on your list — gift ideas, what they are up to. It shows on their page under *Notes about …*, and stays when they leave the list.
+- **The journal** has a page for every day. Today's is on the Today page; *Notes → Journal* goes back and forth a day at a time, with that day's birthdays on its leaf. A page saved empty is gone.
+- **Search** finds notes and journal pages that have every word you type, as the start of a word: `dent tues` finds “Dentist on Tuesday”. Accents do not matter.
+- `*bold*`, `_italic_` and links work, as in WhatsApp. ⌘ (or Ctrl) + Enter saves, and leaving a page with writing not yet saved asks first.
+
+Nothing in the notebook is sent anywhere. It is in the same database file as the list, so `scripts/backup.sh` keeps it too — keep those backups as private as the notes themselves.
+
 ## Keep it running
 
 - **On a Mac, directly**: launchd starts both parts when you sign in and restarts them if they stop — nothing to set.
@@ -186,7 +201,7 @@ The app listens on `127.0.0.1` only. To use it from your phone or share it with 
 docker compose --profile tunnel up -d
 ```
 
-Without a token, `cloudflared` cannot start. The tunnel reaches the app's pages only, never the bridge. (Running on the Mac without Docker, run `cloudflared` itself and point the hostname at `http://localhost:3210`.) The pages need the password, and failed sign-ins are throttled; for more, put a Cloudflare Access policy in front of the hostname.
+Without a token, `cloudflared` cannot start. The tunnel reaches the app's pages only, never the bridge. (Running on the Mac without Docker, run `cloudflared` itself and point the hostname at `http://localhost:3210`.) The pages need the password, and failed sign-ins are throttled; for more — and with your notes in the app, you want more — put a Cloudflare Access policy in front of the hostname.
 
 ## Day to day
 
@@ -246,7 +261,7 @@ The Today page lists each of the day's messages and where it stands; a message W
 cd app && npm ci && npm test
 ```
 
-The app is plain Node 24 (`node:http`, `node:sqlite`, `node:test`), with one dependency to draw the QR code. The pages are rendered on the server; `app/public/app.js` only adds confirmations, the list filter, reading an uploaded file, the live wish preview and QR refresh. Every page but sign-in needs the session cookie, every form post must come from the app's own pages, and the Content-Security-Policy allows no inline script and nothing from other sites.
+The app is plain Node 24 (`node:http`, `node:sqlite`, `node:test`), with one dependency to draw the QR code. The pages are rendered on the server; `app/public/app.js` only adds confirmations, the list filter, reading an uploaded file, the live wish preview, QR refresh, and the notebook's ⌘ + Enter and unsaved-writing warning. Each area's handlers are in `app/src/routes/`, its pages in `app/src/views/`. Every page but sign-in needs the session cookie, every form post must come from the app's own pages, and the Content-Security-Policy allows no inline script and nothing from other sites.
 
 Test anything that sends against a fake bridge, never a linked one: the tests' fakes in `app/test/`, or the app run outside Docker with `BRIDGE_URL` pointing at a stub:
 

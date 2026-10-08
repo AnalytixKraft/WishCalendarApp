@@ -341,3 +341,90 @@ test("Settings: where alerts go, a test alert that says why it did not go, and a
   assert.equal((await post("/settings", { ...base, alertTo: "" }, { cookie })).status, 303);
   assert.match(await (await get("/", cookie)).text(), /Paused — nothing goes out on its own/);
 });
+
+test("notes: write one, find it, change it, pin it, delete it", async () => {
+  const cookie = await signIn();
+  assert.match(await (await get("/notes", cookie)).text(), /<a href="\/notes" aria-current="page">Notes<\/a>/);
+  assert.equal((await post("/notes", { title: "", body: "   " }, { cookie })).status, 422, "an empty note is not saved");
+
+  const created = await post("/notes", { title: "", body: "Dentist on Tuesday at 10:00 #Health\nBring the X-rays." }, { cookie });
+  assert.equal(created.status, 303);
+  const path = created.headers.get("location");
+  assert.match(path, /^\/notes\/\d+$/);
+  const page = await (await get(path, cookie)).text();
+  assert.match(page, /<h1 class="note__title">Dentist on Tuesday at 10:00 #Health<\/h1>/, "no title: the first line is one");
+  assert.match(page, /<div class="note__body">Bring the X-rays.<\/div>/);
+
+  const found = await (await get("/notes?q=dent+x-ray", cookie)).text();
+  assert.match(found, /1 match for “dent x-ray”/);
+  assert.match(found, /<mark>Dentist<\/mark>/);
+  assert.match(await (await get("/notes?tag=health", cookie)).text(), /#health <span class="muted">· 1 note<\/span>/);
+
+  const id = Number(path.split("/").pop());
+  assert.equal((await post(path, { title: "Dentist", body: "Moved to Wednesday", pinned: "1" }, { cookie })).status, 303);
+  assert.deepEqual([db.notes.get(id).title, db.notes.get(id).body, db.notes.get(id).pinned, db.notes.get(id).tags], ["Dentist", "Moved to Wednesday", true, []]);
+  assert.equal((await post(`${path}/pin`, { pinned: "0" }, { cookie })).status, 303);
+  assert.equal(db.notes.get(id).pinned, false);
+
+  assert.equal((await post(`${path}/delete`, {}, { cookie })).status, 303);
+  assert.equal(db.notes.get(id), null);
+  assert.equal((await get(path, cookie)).status, 404);
+});
+
+test("a note shows its text as text: only tags and http(s) links become links", async () => {
+  const cookie = await signIn();
+  const res = await post("/notes", { title: "<img src=x onerror=alert(1)>", body: "<script>alert(1)</script> javascript:alert(1) https://example.com/a?b=1&c=2 #tag" }, { cookie });
+  const page = await (await get(res.headers.get("location"), cookie)).text();
+  assert.ok(page.includes("&lt;img src=x onerror=alert(1)&gt;"));
+  assert.ok(page.includes("&lt;script&gt;alert(1)&lt;/script&gt; javascript:alert(1) "));
+  assert.ok(!page.includes("<script>alert(1)"));
+  assert.ok(page.includes('<a href="https://example.com/a?b=1&amp;c=2" rel="noopener noreferrer" target="_blank">'));
+  assert.ok(page.includes('<a class="tag" href="/notes?tag=tag">#tag</a>'));
+});
+
+test("search never fails, whatever is typed", async () => {
+  const cookie = await signIn();
+  for (const q of ['"', "NEAR(", "title:x", "*", "a AND", "-", "^x", "'; DROP TABLE notes; --", "%", "😀"]) {
+    const res = await get(`/notes?q=${encodeURIComponent(q)}`, cookie);
+    assert.equal(res.status, 200, q);
+  }
+  assert.equal((await get("/notes?tag=%22%3E%3Cscript%3E", cookie)).status, 200, "a tag that cannot be one is ignored");
+});
+
+test("the journal: today's page from Today, any real day, and no such day", async () => {
+  const cookie = await signIn();
+  const today = isoDate(zonedNow(new Date(), db.settings.get().timezone));
+  const home = await (await get("/", cookie)).text();
+  assert.match(home, new RegExp(`<form method="post" action="/journal/${today}" class="form journal-card__form" data-unsaved>`));
+
+  const fromToday = await post(`/journal/${today}`, { back: "today", body: "Coffee with Tom #catchup" }, { cookie });
+  assert.equal(fromToday.headers.get("location"), "/");
+  assert.equal(db.journal.get(today).body, "Coffee with Tom #catchup");
+  assert.match(await (await get("/", cookie)).text(), /Coffee with Tom #catchup<\/textarea>/);
+
+  assert.equal((await get("/journal", cookie)).headers.get("location"), `/journal/${today}`);
+  const page = await (await get(`/journal/${today}`, cookie)).text();
+  assert.match(page, /— today<\/p>/);
+  assert.match(page, /Coffee with Tom #catchup<\/textarea>/);
+
+  assert.equal((await post("/journal/2026-01-31", { body: "Elsewhere" }, { cookie })).headers.get("location"), "/journal/2026-01-31");
+  assert.equal((await get("/journal/2026-02-30", cookie)).status, 404);
+  assert.equal((await post("/journal/2026-13-01", { body: "x" }, { cookie })).status, 404);
+
+  assert.equal((await post(`/journal/${today}`, { body: "" }, { cookie })).status, 303);
+  assert.equal(db.journal.get(today), null, "saved empty, the page is gone");
+});
+
+test("a note about someone is on their page, and outlives them on the list", async () => {
+  const cookie = await signIn();
+  const id = db.people.create({ name: "Noted Person", day: 11, month: 11 });
+  const form = await (await get(`/notes/new?person=${id}`, cookie)).text();
+  assert.match(form, new RegExp(`<option value="${id}" selected>🎂 Noted Person</option>`));
+  const res = await post("/notes", { title: "Likes jazz", body: "", person: String(id) }, { cookie });
+  const noteId = Number(res.headers.get("location").split("/").pop());
+  assert.match(await (await get(`/people/${id}`, cookie)).text(), new RegExp(`Notes about Noted Person[\\s\\S]*<a href="/notes/${noteId}">Likes jazz</a>`));
+  db.people.remove(id);
+  const page = await (await get(`/notes/${noteId}`, cookie)).text();
+  assert.match(page, /Likes jazz/);
+  assert.doesNotMatch(page, /About <a href="\/people/);
+});
