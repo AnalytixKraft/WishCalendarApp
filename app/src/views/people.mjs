@@ -5,6 +5,7 @@ import { MONTHS, formatBirthday, formatDayMonth, formatShortDate } from "../date
 import { DEFAULT_ANNIVERSARY_TEMPLATE, DEFAULT_TEMPLATE, KIND_LABEL, MAX_TEMPLATE, PLACEHOLDERS, occasionNote } from "../messages.mjs";
 import { html, plural, raw, selectOptions, whatsappFormat } from "./html.mjs";
 import { iconOf, layout, occasionWord } from "./layout.mjs";
+import { personNotes } from "./notes.mjs";
 
 /* A default message made this person's, to edit for them: their name in
  * place of {name} and {first_name}. {years}, {ordinal} and {group} stay, so
@@ -150,7 +151,7 @@ export function placeholderHelp() {
 </details>`;
 }
 
-export function personFormPage({ person, values, groups, errors = {}, preview, birthdayToday, wishTime, previewTo, assets, flash }) {
+export function personFormPage({ person, values, groups, errors = {}, preview, birthdayToday, wishTime, previewTo, notes = [], assets, flash }) {
   const kind = values.kind === "anniversary" ? "anniversary" : "birthday";
   const checked = (on) => (on ? raw(" checked") : "");
   const editing = Boolean(person);
@@ -248,7 +249,8 @@ ${editing
   <form method="post" action="/people/${person.id}/delete" class="inline-form person-extras__remove" data-confirm="Delete ${person.name}’s ${occasionWord(person.kind)} from the list? Their wish won’t be sent. What was sent before stays in Recent messages.">
     <button type="submit" class="button button--danger">Delete from the list</button>
   </form>
-</div>`
+</div>
+${personNotes({ person, notes })}`
   : ""}`,
   });
 }

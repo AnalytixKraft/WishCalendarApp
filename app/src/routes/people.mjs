@@ -220,6 +220,7 @@ export function peopleRoutes({ db, scheduler, log, assets, knownGroups }) {
         birthdayToday: person ? isBirthdayOn(person, scheduler.today().date) : false,
         wishTime: settings.wishTime,
         previewTo: settings.myPhone ? formatPhone(settings.myPhone) : "the linked phone",
+        notes: person ? db.notes.forPerson(person.id) : [],
         assets,
         flash: ctx.flash,
       }),

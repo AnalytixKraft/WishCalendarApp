@@ -5,6 +5,7 @@ import { STATE_LABELS } from "../bridge.mjs";
 import { alertSummary } from "../messages.mjs";
 import { html, plural } from "./html.mjs";
 import { clockTime, iconOf, layout, leaf, phoneOf } from "./layout.mjs";
+import { journalCard } from "./notes.mjs";
 
 function waSummary(wa) {
   if (wa.error) return html`<p class="status"><span class="dot dot--bad" aria-hidden="true"></span><span class="status__text">${wa.error}</span></p>`;
@@ -61,7 +62,7 @@ function recentResult(d) {
   }
 }
 
-export function todayPage({ today, settings, reminderLabel, alertLabel, wa, agenda, upcoming, recent, last, counts, assets, flash }) {
+export function todayPage({ today, settings, reminderLabel, alertLabel, wa, agenda, upcoming, recent, last, counts, journal, assets, flash }) {
   const todays = upcoming.filter((u) => u.inDays === 0).map((u) => u.person);
   const later = new Map();
   for (const u of upcoming.filter((u) => u.inDays > 0)) {
@@ -101,6 +102,8 @@ export function todayPage({ today, settings, reminderLabel, alertLabel, wa, agen
         ${setupSteps.map(([done, text]) => html`<li class="${done ? "is-done" : ""}"><span class="setup__mark" aria-hidden="true">${done ? "✓" : ""}</span><span>${text}${done ? html`<span class="visually-hidden"> (done)</span>` : ""}</span></li>`)}
       </ol>
     </section>`}
+
+    ${journalCard({ date: today, page: journal })}
 
     <section class="card">
       <h2 class="eyebrow">WhatsApp</h2>

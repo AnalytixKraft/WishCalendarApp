@@ -23,6 +23,25 @@ window.addEventListener("pageshow", (event) => {
   if (event.persisted) for (const button of document.querySelectorAll("button[disabled]")) button.disabled = false;
 });
 
+// Notes and the journal: writing not saved yet is not lost to a stray click
+// — leaving the page asks first — and ⌘ or Ctrl + Enter saves.
+for (const form of document.querySelectorAll("form[data-unsaved]")) {
+  let dirty = false;
+  form.addEventListener("input", () => (dirty = true));
+  form.addEventListener("submit", () => (dirty = false));
+  window.addEventListener("beforeunload", (event) => {
+    if (!dirty) return;
+    event.preventDefault();
+    event.returnValue = "";
+  });
+  form.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && event.target.tagName === "TEXTAREA") {
+      event.preventDefault();
+      form.requestSubmit();
+    }
+  });
+}
+
 // People: filter the table by name as you type.
 for (const input of document.querySelectorAll("[data-filter]")) {
   const table = document.getElementById(input.dataset.filter);

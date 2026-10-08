@@ -27,6 +27,7 @@ export function clockTime(iso, timeZone, withDate = false) {
 
 const NAV = [
   ["today", "/", "Today"],
+  ["notes", "/notes", "Notes"],
   ["people", "/people", "People"],
   ["settings", "/settings", "Settings"],
 ];
