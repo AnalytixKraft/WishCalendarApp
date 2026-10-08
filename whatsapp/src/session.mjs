@@ -36,7 +36,7 @@ import makeWASocket, {
   makeCacheableSignalKeyStore,
   useMultiFileAuthState,
 } from "@whiskeysockets/baileys";
-import { HeldCommands, commandOf } from "./commands.mjs";
+import { HeldCommands, readMessage } from "./commands.mjs";
 import { BridgeError, TtlCache, baileysLog, log, withTimeout } from "./util.mjs";
 
 /* auth/ under DATA_DIR — the `whatsapp_auth` volume in Docker — is the
@@ -74,6 +74,13 @@ const DIRECT_PER_HOUR = 30;
 /* Whether a number is on WhatsApp, and under which JID, asked once a day
  * per number rather than before every message. */
 const LOOKUP_TTL_MS = 24 * 60 * 60_000;
+/* How long after the bridge writes into a group, or to a person, what comes
+ * from there gets through (ignoresSender) — so a phone that cannot decrypt
+ * the message can ask for it again. Baileys keeps what it sent for a re-send
+ * 5 minutes (Utils/message-retry-manager.js: recentMessagesMap) and counts
+ * re-sends 15; after that a request could not be answered anyway, because
+ * nothing here keeps messages (getMessage). */
+const LISTEN_MS = 15 * 60_000;
 
 const BAILEYS_VERSION = createRequire(import.meta.url)("@whiskeysockets/baileys/package.json").version;
 
@@ -184,39 +191,40 @@ function findMe(meta, mine) {
  * challenge stands in front of.
  *
  * Kept:
- *   - groups, because the send depends on them. The delivery receipts, the
- *     retry receipts a member's phone sends when it cannot decrypt a message
- *     (Baileys answers those by re-sending), and the membership changes the
- *     metadata cache listens for all carry the GROUP's JID.
+ *   - the groups the owner chose for 📅 messages (commands.mjs) — the one
+ *     thing the bridge reads there is the owner's own 📅 messages.
+ *   - a group the bridge has posted in, for LISTEN_MS after: the retry
+ *     receipt a member's phone sends when it cannot decrypt a message
+ *     (Baileys answers it by re-sending) carries the GROUP's JID.
+ *   - the people this bridge has sent a direct message to, for LISTEN_MS
+ *     after (`peers`: their phone-number JID and, once WhatsApp has told
+ *     us, their LID): a 1:1 message's receipts come from the person's own
+ *     JID, the retry receipt among them. Dropped, the message would sit on
+ *     their phone as "Waiting for this message".
  *   - the linked account itself, which is no stranger: the phone's own
  *     protocol messages (app-state keys) and device-list changes are
  *     Baileys' business, and starving it of them is a risk with no gain.
- *   - the people this bridge has sent a direct message to (`peers`: their
- *     phone-number JID and, once WhatsApp has told us, their LID). A 1:1
- *     message's receipts come from the person's own JID — among them the
- *     retry receipt their phone sends when it cannot decrypt the message,
- *     which Baileys answers by re-sending. Dropped, the message would sit on
- *     their phone as "Waiting for this message".
- * Dropped: everyone else — strangers' DMs, calls, status updates, broadcast
- * lists, channels, and other users' device and key-change notices. The send
- * needs none of these: it fetches device lists fresh (Baileys keeps them
- * 5 min), and a group member whose keys changed answers with a retry
- * receipt, which comes from the group's JID.
+ * Dropped: everyone and everything else — every other group, strangers'
+ * DMs, calls, status updates, broadcast lists, channels, and other users'
+ * device and key-change notices. The send needs none of these: it reads a
+ * group's members fresh before each post (deliverToGroup), and fetches device
+ * lists fresh (Baileys keeps them 5 min).
  * The server's own `@s.whatsapp.net` (pre-key top-ups and the like) is never
  * put to this; Baileys exempts it.
  *
- * NOT closed: messages members post in a group the number is in are still
- * decrypted, and so is a reply from someone it messaged directly. The hook
- * sees only a JID, and those share it with the receipts the send depends on.
- * Nothing acts on either: the one message the bridge acts on is a 📅 message
- * the linked account sent itself (commands.mjs), and everything else is let
- * go of unread.
+ * NOT closed: in a chosen group, and in any group for LISTEN_MS after a
+ * post, what members write is decrypted too, and so is a reply from someone
+ * it has just messaged. The hook sees only a JID, and those share it with
+ * the receipts. Nothing acts on any of it: the one message the bridge acts
+ * on is a 📅 message the owner sent (commands.mjs), and everything else is
+ * let go of unread.
  *
  * `me` is creds.me, read at each call: Baileys fills it in on the object
- * itself when a pairing succeeds. Before that (pairing) there is no "self",
- * and nothing but groups gets through — nothing else is needed to pair. */
-export function ignoresSender(jid, me, peers = new Set()) {
-  if (isJidGroup(jid)) return false;
+ * itself when a pairing succeeds. Before that (pairing) there is no "self" —
+ * and nothing is needed to pair. `groups` and `peers` answer has(jid). */
+const NONE = { has: () => false };
+export function ignoresSender(jid, me, { groups = NONE, peers = NONE } = {}) {
+  if (isJidGroup(jid)) return !groups.has(jid);
   const from = jidDecode(jid);
   if (!from) return true;
   if (peers.has(`${from.user}@${from.server}`)) return false;
@@ -282,15 +290,20 @@ export async function startSession() {
   const groupMetadata = new TtlCache(GROUP_METADATA_TTL_MS);
   const sent = new TtlCache(IDEMPOTENCY_TTL_MS);
   const inflight = new Map();
-  /* Direct messages: whom we have written to (ignoresSender lets their
-   * receipts through), when (the hourly cap), and which numbers WhatsApp
-   * says it knows. Memory only: after a restart a person is let through
-   * again from the next message to them on. */
-  const peers = new Set();
+  /* Direct messages: whom we have just written to (ignoresSender lets their
+   * receipts through, for LISTEN_MS), when (the hourly cap), and which
+   * numbers WhatsApp says it knows. Memory only. */
+  const peers = new TtlCache(LISTEN_MS);
   const directSentAt = [];
   const lookups = new TtlCache(LOOKUP_TTL_MS);
-  /* 📅 messages from the account's owner, until the app takes them. */
+  /* 📅 messages from the account's owner, until the app takes them; the
+   * chats they count in, as the app last said (none until it has); and the
+   * groups just posted in. ignoresSender lets through only the groups in
+   * one of those two. */
   const held = new HeldCommands();
+  let commandChats = new Set();
+  const postedIn = new TtlCache(LISTEN_MS);
+  const listenedGroups = { has: (jid) => commandChats.has(jid) || postedIn.has(jid) };
   /* pair(), logout() and the pairing deadline each read the state, await
    * (a socket ending, the directory being wiped), then act on what they
    * read. Run them one at a time, in arrival order, so none acts on a state
@@ -448,10 +461,10 @@ export async function startSession() {
         // owner typed (commands.mjs). Re-sends to a member whose phone could
         // not decrypt come from a cache filled when sending, not from this.
         emitOwnEvents: false,
-        // Everything inbound that is not a group, this account or someone it
-        // wrote to is dropped undecrypted — ignoresSender, above, says what
-        // that keeps and why.
-        shouldIgnoreJid: (jid) => ignoresSender(jid, auth.creds.me, peers),
+        // Everything inbound that is not a chosen group, this account, or a
+        // group or person it has just written to is dropped undecrypted —
+        // ignoresSender, above, says what that keeps and why.
+        shouldIgnoreJid: (jid) => ignoresSender(jid, auth.creds.me, { groups: listenedGroups, peers }),
       });
       sock = socket;
 
@@ -462,24 +475,30 @@ export async function startSession() {
         if (myGen === gen) onConnectionUpdate(myGen, socket, auth, update);
       });
       // The one inbound message acted on: a 📅 message the owner sent, from
-      // the phone or another of their devices (commands.mjs, commandOf).
-      // Held for the app; everything else is dropped here, unread beyond
-      // that check. (Not listening is not the same as not decrypting:
-      // shouldIgnoreJid above is what limits that.)
+      // the phone or another of their devices, in a chat they chose
+      // (commands.mjs, readMessage). Held for the app; everything else is
+      // dropped here, unread beyond that check. (Not listening is not the
+      // same as not decrypting: shouldIgnoreJid above is what limits that.)
       socket.ev.on("messages.upsert", ({ messages }) => {
         if (myGen !== gen) return;
         try {
           const mine = myJids(socket);
           for (const message of messages) {
-            const command = commandOf(message, mine);
-            if (command && held.add(command)) log.info({ chat: command.chat, message_id: command.id }, "📅 message held for the app"); // never its text
+            const read = readMessage(message, mine, commandChats);
+            // The log has the chat's kind and the message's id: never its
+            // text, never who sent it.
+            const added = read?.command ? held.add(read.command) : null;
+            if (added === "held") log.info({ chat: read.command.chat, message_id: read.command.id }, "📅 message held for the app");
+            if (added === "too_many") log.warn({ chat: read.command.chat, message_id: read.command.id }, "📅 message not taken: 30 already this hour from that chat");
+            if (read?.skipped) log.info({ message_id: message.key.id, why: read.skipped }, "📅 message not taken");
           }
         } catch (err) {
           log.warn({ err: describe(err) }, "could not read an incoming message");
         }
       });
       // Membership or settings changed: forget what we cached, so the next
-      // send re-reads it.
+      // send re-reads it. (Heard from listened groups only; a post reads the
+      // members fresh anyway.)
       socket.ev.on("groups.update", (updates) => {
         for (const u of updates) if (u.id) groupMetadata.delete(u.id);
       });
@@ -728,7 +747,7 @@ export async function startSession() {
 
     const admit = (jid) => {
       const who = jid && jidDecode(jid);
-      if (who) peers.add(`${who.user}@${who.server}`);
+      if (who) peers.set(`${who.user}@${who.server}`, true);
     };
     const lidOf = () => socket.signalRepository.lidMapping.getLIDForPN(target).catch(() => null);
     admit(target);
@@ -781,6 +800,8 @@ export async function startSession() {
       log.warn({ chat_id: chatId }, "send refused: only admins can post in this group");
       throw new BridgeError(403, "admins_only");
     }
+    // Before the post: a member's phone may ask for it again within seconds.
+    postedIn.set(chatId, true);
     let msg;
     try {
       // linkPreview: null, not left out. Left undefined, Baileys builds a
@@ -878,6 +899,15 @@ export async function startSession() {
     send,
     commands: () => held.list(),
     ackCommands: (ids) => held.ack(ids),
+    commandChats: () => [...commandChats].sort(),
+    /* The chats 📅 messages count in, as the app says: "self" and group
+     * ids. What was held from a chat no longer in it goes. */
+    setCommandChats(chats) {
+      commandChats = new Set(chats);
+      held.keepOnly(commandChats);
+      log.info({ self: commandChats.has("self"), groups: [...commandChats].filter((c) => c !== "self").length }, "📅 messages: chats chosen");
+      return [...commandChats].sort();
+    },
     stop,
   };
 }

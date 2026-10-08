@@ -114,8 +114,10 @@ export function createBridge({ url, token, fetchImpl = globalThis.fetch }) {
     // Above the bridge's own 30 s send timeout, so its answer arrives first.
     send: ({ chatId, text, key }) =>
       call("POST", "/send", { body: { chat_id: chatId, text, idempotency_key: key }, timeoutMs: 45_000 }),
-    // The 📅 messages the owner sent, held until we say we have them.
-    commands: async () => (await call("GET", "/commands", { timeoutMs: 10_000 })).commands,
+    // 📅 messages, held until we say we have them — and the chats they
+    // count in, as the bridge has them: {commands, chats}.
+    commands: () => call("GET", "/commands", { timeoutMs: 10_000 }),
     ackCommands: (ids) => call("POST", "/commands/ack", { body: { ids }, timeoutMs: 10_000 }),
+    setCommandChats: (chats) => call("POST", "/commands/chats", { body: { chats }, timeoutMs: 10_000 }),
   };
 }

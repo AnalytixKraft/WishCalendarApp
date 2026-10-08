@@ -245,7 +245,7 @@ export function eventFormPage({ event = null, values, errors = {}, morning, asse
     <span class="field__label">Reminder</span>
     <select name="remind"${invalid(errors.remind)}>${selectOptions([["", "No reminder"], ...REMINDERS], values.remind)}</select>
     ${error(errors.remind)}
-    <span class="hint">On WhatsApp, to where calendar messages go (Settings). An all-day event’s reminder goes at ${morning}, the day or days before; on the day itself it is in “Your day”.</span>
+    <span class="hint">On WhatsApp, to where calendar messages go (Settings). An all-day event’s reminder goes at ${morning}, the day or days before — one minutes before it is not kept, as it is in “Your day” that morning.</span>
   </label>
   <label class="field">
     <span class="field__label">Notes <span class="optional">optional — they go with the reminder</span></span>

@@ -31,28 +31,31 @@ keeping the text path only, and adding messages to people's numbers.
   (`onWhatsApp`, asked once a day per number), and at most **30 an hour**:
   direct messages from an unofficial client are what WhatsApp's spam checks
   look for, and the cap keeps a loop or a leaked token from becoming a burst.
-- Acts on one kind of inbound message only: a **📅 message** — one the linked
-  account sent *itself* (from the phone, or another of its devices), into a
-  group or into its own chat (*Message yourself*), starting with 📅 or 📆
-  ([`src/commands.mjs`](src/commands.mjs)). Its text, and the text of the
-  message it replies to, are held in memory — never on disk, never in the
+- Acts on one kind of inbound message only: a **📅 message** — one that
+  starts with 📅 or 📆, in a chat the owner chose in the app (*Settings →
+  Calendar*, sent here as `POST /commands/chats`): a group, where **anyone in
+  it** may send one, or the linked account's own chat (*Message yourself*),
+  where only it writes ([`src/commands.mjs`](src/commands.mjs)). At most 30 an
+  hour from one chat. Its text, the text of the message it replies to, and
+  its sender's display name are held in memory — never on disk, never in the
   log — until the app takes them (`GET /commands`, `POST /commands/ack`): at
-  most 100, for at most 3 days. Every other message is let go of as it
-  arrives, unread beyond that check: above all, **everything anyone else
-  sends** — no one else can put anything on the calendar. What the bridge
-  sends itself never comes back to it as an incoming message
-  (`emitOwnEvents: false`), and nothing it sends starts with 📅 or 📆.
+  most 100, for at most 3 days. Until the app has said which chats, after a
+  start, there are none. Every other message is let go of as it arrives,
+  unread beyond that check. What the bridge sends itself never comes back to
+  it as an incoming message (`emitOwnEvents: false`), and nothing it sends
+  starts with 📅 or 📆.
 - Otherwise reads, stores and reacts to nothing inbound: no history sync, no
-  message store. Baileys is told to drop everything that is
-  not from a group, from the linked account itself, or from someone the bridge
-  has sent a direct message to **before decrypting it** (`shouldIgnoreJid` →
-  `ignoresSender` in [`src/session.mjs`](src/session.mjs)). That last set is
-  there because a person's receipts — among them the retry receipt their phone
-  sends when it cannot decrypt a message — come from their own JID; it holds
-  their phone-number JID and, once WhatsApp has said, their LID, in memory
-  only. What members post in a group the number is in, and a reply from
-  someone it messaged, are still decrypted — the hook sees only the JID — and
-  nothing acts on either: only the owner's own 📅 messages are kept.
+  message store. Baileys is told to drop everything **before decrypting it**
+  (`shouldIgnoreJid` → `ignoresSender` in [`src/session.mjs`](src/session.mjs))
+  unless it is from the linked account itself, a chosen group, or a group or
+  person the bridge has written to **in the last 15 minutes** — because the
+  retry receipt a phone sends when it cannot decrypt a message comes from the
+  group's JID, or the person's (their phone-number JID and, once WhatsApp has
+  said, their LID). Baileys can re-send a message for only 5 minutes, so a
+  longer window would serve nothing. Every other group is not decrypted at
+  all. In a chosen group, and in a group just posted in, what members write is
+  decrypted — the hook sees only the JID — and nothing acts on it but a 📅
+  message in a chosen one.
 - Publishes no port and is not in the tunnel: only the app, on the `whatsapp`
   compose network, can reach it — and every call but `/healthz` needs the token
   anyway.
@@ -103,7 +106,8 @@ is something to add.
 | `POST /logout` | Unlinks: tells WhatsApp if connected (so the phone's list drops the device), wipes `/data/auth`, → `idle`. |
 | `GET /groups` | `200 {"groups":[{"id","subject","participants","announce","is_admin"}]}`, sorted by subject. `409 not_connected` unless `open`; `502 groups_failed` if WhatsApp does not answer. |
 | `POST /send` | `{"chat_id","text","idempotency_key"}` → `200 {"message_id","chat_id","deduplicated"}`. `chat_id` is a group (`…@g.us`) or a phone number (`919876543210@s.whatsapp.net`). |
-| `GET /commands` | `200 {"commands":[{"id","chat","chat_id","sent_at","text","quoted"}]}`: the 📅 messages held, oldest first. `chat` is `group` or `self`; `text` is what follows the 📅; `quoted` the text of the message it replies to, or `null`. In any state — it is the bridge's memory, not a call to WhatsApp. |
+| `GET /commands` | `200 {"commands":[{"id","chat","chat_id","sent_at","text","quoted","from_me","sender"}],"chats":[…]}`: the 📅 messages held, oldest first, and the chats they count in. `chat` is `group` or `self`; `text` is what follows the 📅; `quoted` the text of the message it replies to, or `null`; `sender` the sender's display name when it is not the linked account. In any state — it is the bridge's memory, not a call to WhatsApp. |
+| `POST /commands/chats` | `{"chats":["self","…@g.us"]}` → `200 {"chats"}`: the chats 📅 messages count in from now on — `self` and group ids; what was held from any other goes. `400 invalid_chats` otherwise. |
 | `POST /commands/ack` | `{"ids":[…]}` → `200 {"acked"}`: the app has these; let them go. `400 invalid_ids` unless an array of up to 500 non-empty strings. The app's poller is the one caller: anything else taking them takes them off the calendar. |
 
 `/send` refuses, in this order:
@@ -136,8 +140,10 @@ out twice.
 docker compose logs --tail 50 whatsapp   # JSON lines; never the token, a QR or a message's text
 ```
 
-`📅 message held for the app` (with `chat` and `message_id`) is a 📅 message
-the owner sent; the app takes it within 15 seconds.
+`📅 message held for the app` (with `chat` and `message_id`) is a 📅 message;
+the app takes it within 15 seconds. `📅 message not taken` says why one with
+a calendar emoji in it was not one (`why`), and `📅 messages: chats chosen`
+how many chats the app chose — never which messages, nor who sent them.
 
 ```bash
 docker compose restart whatsapp          # keeps the link (a stop is never a logout)

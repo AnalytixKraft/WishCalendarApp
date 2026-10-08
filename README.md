@@ -196,7 +196,7 @@ Calendar messages go to the linked phone (*Message yourself*) unless you change 
 
 ### Add to the calendar from WhatsApp
 
-Start a WhatsApp message with 📅 (or 📆) — in any group, or in *Message yourself* — and it goes on the calendar:
+Start a WhatsApp message with 📅 (or 📆), in a chat ticked in **Settings → Calendar → Where 📅 messages count**, and it goes on the calendar:
 
 | You send | It adds |
 |---|---|
@@ -209,9 +209,11 @@ Start a WhatsApp message with 📅 (or 📆) — in any group, or in *Message yo
 
 To add what someone else wrote — “Choir moves to Sat 6pm” — **reply to it with just 📅**. Your own words in the reply become the title (`📅 choir`), and a day or time in it wins over theirs.
 
-It reads days the way you would say them — *today*, *tonight*, *tomorrow*, *Tue*, *next Fri*, *15 Oct*, *Oct 15*, *15/10* (day first), *2026-10-15*, *10-13 Oct* — and times like *10am*, *6.30pm*, *18:30*, *6-8pm*, *noon*. A day already gone this year means next year's. The answer comes in *Message yourself*: what was added, and when — check it, and change anything in **Calendar**.
+It reads days the way you would say them — *today*, *tonight*, *tomorrow*, *Tue*, *next Fri*, *15 Oct*, *Oct 15*, *15/10* (day first), *2026-10-15*, *10-13 Oct* — and times like *10am*, *6.30pm*, *18:30*, *6-8pm*, *noon*. A day already gone this year means next year's. A new event gets a reminder **5 minutes before** (Settings → Calendar → *Remind me before each new event*). The answer — what was added, and when — goes where calendar messages go: check it, and change anything in **Calendar**.
 
-Only messages **from the linked number** count; nothing anyone else sends can add to your calendar. (It works because the linked number is yours: what you send from your phone reaches this app too.) In a group, everyone there sees your 📅 message — *Message yourself* is the private way. **Settings → Calendar → Add to my calendar from WhatsApp** turns it off.
+**Where it counts** is yours to tick: *Message yourself* (the linked number's own chat, ticked unless you change it), and any of the linked number's groups. In a group you tick, **anyone in it** can add to the calendar — a family's or a team's shared calendar — at most 30 messages an hour, each with its sender's name. Groups you don't tick are not read at all: their messages are dropped before they are even decrypted (but for a quarter of an hour after a wish goes into one, so its members' phones can ask for it again — even then, none is read).
+
+The app's messages come *from* the linked number. If that is your own number, WhatsApp does not notify you of them — to WhatsApp they are messages you sent. Link a spare number, and the answers, “Your day” and the reminders reach you like any message: in a group you are in, or straight to your number (*My number*).
 
 ## Notes and the journal
 

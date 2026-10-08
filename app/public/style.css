@@ -865,6 +865,18 @@ mark { background: var(--marigold-wash); color: inherit; border-radius: 3px; pad
 .journal-card__form { gap: 12px; }
 .journal-card .ruled { min-height: calc(4 * 1.75rem + 4px); }
 
+/* Settings → Calendar: where 📅 messages count. */
+.chat-picks__list {
+  display: grid;
+  gap: 2px;
+  max-height: 17rem;
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1.5px solid var(--rule);
+  border-radius: 8px;
+}
+.chat-picks__list .check { margin: 0; padding: 4px 0; }
+
 .person-notes { margin-top: 20px; }
 .person-notes__list { margin: 0 0 14px; padding-left: 1.2em; }
 .person-notes__list li + li { margin-top: 4px; }
