@@ -194,6 +194,25 @@ Tomorrow
 
 Calendar messages go to the linked phone (*Message yourself*) unless you change it in **Settings → Calendar**; *Nowhere* turns them off. They are yours, so they never go with the wishes' morning reminder. Like every message, they wait while sending is paused, and an alert tells you when one is refused.
 
+### Add to the calendar from WhatsApp
+
+Start a WhatsApp message with 📅 (or 📆) — in any group, or in *Message yourself* — and it goes on the calendar:
+
+| You send | It adds |
+|---|---|
+| `📅 Dentist Tue 10am` | an event, the coming Tuesday at 10:00 |
+| `📅 Choir Sat 6-8pm` | an event, Saturday 18:00–20:00 |
+| `📅 Trip to Munnar 10-13 Oct` | an event over four days, all day |
+| `📅 Call Mum 6:30pm` | an event that day — or the next, if 18:30 has passed |
+| `📅 task Pay rent by Fri` | a task, due Friday |
+| `📅 Buy batteries` | a task, no day (there is no day or time in it) |
+
+To add what someone else wrote — “Choir moves to Sat 6pm” — **reply to it with just 📅**. Your own words in the reply become the title (`📅 choir`), and a day or time in it wins over theirs.
+
+It reads days the way you would say them — *today*, *tonight*, *tomorrow*, *Tue*, *next Fri*, *15 Oct*, *Oct 15*, *15/10* (day first), *2026-10-15*, *10-13 Oct* — and times like *10am*, *6.30pm*, *18:30*, *6-8pm*, *noon*. A day already gone this year means next year's. The answer comes in *Message yourself*: what was added, and when — check it, and change anything in **Calendar**.
+
+Only messages **from the linked number** count; nothing anyone else sends can add to your calendar. (It works because the linked number is yours: what you send from your phone reaches this app too.) In a group, everyone there sees your 📅 message — *Message yourself* is the private way. **Settings → Calendar → Add to my calendar from WhatsApp** turns it off.
+
 ## Notes and the journal
 
 **Notes** is your notebook.

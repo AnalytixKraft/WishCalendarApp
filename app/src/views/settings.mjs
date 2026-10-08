@@ -70,7 +70,7 @@ export function settingsPage({ values, errors = {}, timeZones, groups, wa, asset
 ${whatsappSection(wa)}
 <form method="post" action="/settings" class="card form" novalidate>
   <h2 class="settings-title">Messages</h2>
-  <label class="check check--big"><input type="checkbox" name="enabled" value="1"${values.enabled ? raw(" checked") : ""}> <span><strong>Send wishes and reminders automatically</strong><br><span class="hint">Ticked, each goes out at its time. Unticked, the app pauses: nothing goes out on its own — no wishes, reminders, calendar messages or alerts — until you tick it again. The Send now buttons work either way.</span></span></label>
+  <label class="check check--big"><input type="checkbox" name="enabled" value="1"${values.enabled ? raw(" checked") : ""}> <span><strong>Send wishes and reminders automatically</strong><br><span class="hint">Ticked, each goes out at its time. Unticked, the app pauses: nothing goes out on its own — no wishes, reminders, calendar messages or alerts — until you tick it again. The Send now buttons, and the answers to your 📅 messages, work either way.</span></span></label>
 
   <fieldset class="settings-group">
     <legend>Wishes</legend>
@@ -132,6 +132,8 @@ ${whatsappSection(wa)}
       ${error(errors.calendarTo)}
     </label>
     <p class="hint">At the reminder time, “Your day” lists the day’s events, the tasks due, and tomorrow’s events — on days that have any. An event with a reminder gets a message of its own at that time. They go apart from the wishes’ reminder; choose a group only if everyone in it may read them.</p>
+    <input type="hidden" name="captureShown" value="1">
+    <label class="check check--big"><input type="checkbox" name="capture" value="1"${values.capture ? raw(" checked") : ""}> <span><strong>Add to my calendar from WhatsApp</strong><br><span class="hint">Start a message with 📅 — in any group, or in Message yourself — like <code>📅 Dentist Tue 10am</code>, <code>📅 Trip 10-13 Oct</code> or <code>📅 task Pay rent by Fri</code>. Or reply 📅 to someone’s message, to add what it says. Only messages from the linked number count, never anyone else’s. The answer comes in Message yourself; in a group, everyone there sees your 📅 message.</span></span></label>
   </fieldset>
 
   <fieldset class="settings-group" id="alerts">

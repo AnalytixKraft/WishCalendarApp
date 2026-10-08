@@ -57,6 +57,8 @@ function recentTitle(d) {
       return "Your day";
     case "event":
       return `Reminder: ${d.title ?? "an event"}`;
+    case "capture":
+      return `Added from WhatsApp: ${d.title ?? "a 📅 message"}`;
     default:
       return `Preview of ${d.person_name ?? "a wish"}`;
   }

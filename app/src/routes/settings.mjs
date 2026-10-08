@@ -128,6 +128,7 @@ export function settingsRoutes({ db, bridge, scheduler, log, assets, auth, throt
       // it keeps them as they are, rather than turning them off.
       alertTo: form.has("alertTo") ? form.get("alertTo") : before.alertTo,
       calendarTo: form.has("calendarTo") ? form.get("calendarTo") : before.calendarTo,
+      capture: form.has("captureShown") ? form.has("capture") : before.capture,
       countryCode: form.get("countryCode").replace(/^\+/, ""),
     };
     const errors = {};

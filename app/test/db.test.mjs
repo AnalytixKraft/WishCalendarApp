@@ -180,7 +180,7 @@ test("migration 7 keeps every message sent, alerts' text included, and adds the 
     db.close();
     // Back to version 6, with that alert in a deliveries table without `title`.
     const raw = new DatabaseSync(file);
-    raw.exec(`DROP TABLE events; DROP TABLE tasks; ALTER TABLE deliveries DROP COLUMN title; PRAGMA user_version = 6;`);
+    raw.exec(`DROP TABLE captures; DROP TABLE events; DROP TABLE tasks; ALTER TABLE deliveries DROP COLUMN title; PRAGMA user_version = 6;`);
     raw.close();
 
     db = openDb(file);
