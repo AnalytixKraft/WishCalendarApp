@@ -4,7 +4,16 @@
 import { MAX_PASSWORD, MIN_PASSWORD } from "./auth.mjs";
 import { STATE_LABELS } from "./bridge.mjs";
 import { MONTHS, WEEKDAYS, ageOn, formatBirthday, formatDayMonth, formatShortDate, weekdayOf, zonedNow } from "./dates.mjs";
-import { DEFAULT_ANNIVERSARY_TEMPLATE, DEFAULT_TEMPLATE, KIND_ICON, KIND_LABEL, MAX_TEMPLATE, PLACEHOLDERS, occasionNote } from "./messages.mjs";
+import {
+  DEFAULT_ANNIVERSARY_TEMPLATE,
+  DEFAULT_TEMPLATE,
+  KIND_ICON,
+  KIND_LABEL,
+  MAX_TEMPLATE,
+  PLACEHOLDERS,
+  alertSummary,
+  occasionNote,
+} from "./messages.mjs";
 
 const iconOf = (kind) => KIND_ICON[kind] ?? KIND_ICON.birthday;
 
@@ -206,7 +215,34 @@ function clockTime(iso, timeZone, withDate = false) {
   return withDate ? `${formatDayMonth(t)}, ${time}` : time;
 }
 
-export function todayPage({ today, settings, reminderLabel, wa, agenda, upcoming, recent, last, counts, assets, flash }) {
+/* What a row of Recent messages was. */
+function recentTitle(d) {
+  switch (d.kind) {
+    case "wish":
+      return `Wish for ${d.person_name}`;
+    case "reminder":
+      return "Your reminder";
+    case "alert":
+      return `Alert: ${alertSummary(d.text)}`;
+    default:
+      return `Preview of ${d.person_name ?? "a wish"}`;
+  }
+}
+
+function recentResult(d) {
+  switch (d.status) {
+    case "sent":
+      return html`<span class="tick tick--sent" aria-hidden="true">✓</span> Sent`;
+    case "sending":
+      return html`<span class="tick tick--sending" aria-hidden="true">…</span> Sending`;
+    case "pending":
+      return html`<span class="tick tick--due" aria-hidden="true">◷</span> Waiting to be sent`;
+    default:
+      return html`<span class="tick tick--failed" aria-hidden="true">✕</span> ${d.error}`;
+  }
+}
+
+export function todayPage({ today, settings, reminderLabel, alertLabel, wa, agenda, upcoming, recent, last, counts, assets, flash }) {
   const todays = upcoming.filter((u) => u.inDays === 0).map((u) => u.person);
   const later = new Map();
   for (const u of upcoming.filter((u) => u.inDays > 0)) {
@@ -252,7 +288,7 @@ export function todayPage({ today, settings, reminderLabel, wa, agenda, upcoming
       ${waSummary(wa)}
       <h2 class="eyebrow">Sending</h2>
       ${settings.enabled
-        ? html`<p class="status"><span class="dot dot--ok" aria-hidden="true"></span><span class="status__text">On — wishes at ${settings.wishTime}, ${reminderLabel ? `your reminder at ${settings.reminderTime} to ${reminderLabel}` : "no reminder"} <span class="muted">(${settings.timezone})</span></span></p>`
+        ? html`<p class="status"><span class="dot dot--ok" aria-hidden="true"></span><span class="status__text">On — wishes at ${settings.wishTime}, ${reminderLabel ? `your reminder at ${settings.reminderTime} to ${reminderLabel}` : "no reminder"}, ${alertLabel ? `alerts to ${alertLabel}` : "no alerts"} <span class="muted">(${settings.timezone})</span></span></p>`
         : html`<p class="status"><span class="dot dot--off" aria-hidden="true"></span><span class="status__text">Paused — nothing goes out on its own. <a href="/settings">Turn sending on</a></span></p>`}
       ${last.waiting ? html`<p class="notice">Messages are waiting: ${last.waiting}</p>` : ""}
       <form method="post" action="/run" class="inline-form" data-confirm="Send every message for today that has not gone out yet, now?">
@@ -295,13 +331,9 @@ export function todayPage({ today, settings, reminderLabel, wa, agenda, upcoming
     <tbody>${recent.map(
       (d) => html`<tr>
       <td class="nowrap">${clockTime(d.updated_at, settings.timezone, true)}</td>
-      <td>${d.kind === "wish" ? `Wish for ${d.person_name}` : d.kind === "reminder" ? "Your reminder" : `Preview of ${d.person_name ?? "a wish"}`}</td>
-      <td>${d.chat_subject}</td>
-      <td>${d.status === "sent"
-        ? html`<span class="tick tick--sent" aria-hidden="true">✓</span> Sent`
-        : d.status === "sending"
-          ? html`<span class="tick tick--sending" aria-hidden="true">…</span> Sending`
-          : html`<span class="tick tick--failed" aria-hidden="true">✕</span> ${d.error}`}</td>
+      <td>${recentTitle(d)}</td>
+      <td>${d.chat_subject || "—"}</td>
+      <td>${recentResult(d)}</td>
     </tr>`,
     )}</tbody>
   </table></div>`
@@ -668,7 +700,7 @@ export function settingsPage({ values, errors = {}, timeZones, groups, wa, asset
 ${whatsappSection(wa)}
 <form method="post" action="/settings" class="card form" novalidate>
   <h2 class="settings-title">Messages</h2>
-  <label class="check check--big"><input type="checkbox" name="enabled" value="1"${values.enabled ? raw(" checked") : ""}> <span><strong>Send wishes and reminders automatically</strong><br><span class="hint">Ticked, each goes out at its time. Unticked, the app pauses: nothing goes out on its own until you tick it again. The Send now buttons work either way.</span></span></label>
+  <label class="check check--big"><input type="checkbox" name="enabled" value="1"${values.enabled ? raw(" checked") : ""}> <span><strong>Send wishes and reminders automatically</strong><br><span class="hint">Ticked, each goes out at its time. Unticked, the app pauses: nothing goes out on its own — no wishes, reminders or alerts — until you tick it again. The Send now buttons work either way.</span></span></label>
 
   <fieldset class="settings-group">
     <legend>Wishes</legend>
@@ -722,6 +754,20 @@ ${whatsappSection(wa)}
     <p class="hint">Before the wishes go out, the reminder lists every wish of the day — its time, where it goes, what it says — and the birthdays and anniversaries this many days ahead. “This WhatsApp” puts it in the linked phone’s own chat (Message yourself). Previews go to your number, or to the linked phone if you leave it empty.</p>
   </fieldset>
 
+  <fieldset class="settings-group" id="alerts">
+    <legend>Alerts</legend>
+    <label class="field field--short">
+      <span class="field__label">When a wish is not sent, tell</span>
+      <select name="alertTo"${invalid(errors.alertTo)}>${sendToOptions(values.alertTo, groups, { self: "This WhatsApp — the linked phone", direct: "My number (above)", none: "No one — no alerts" })}</select>
+      ${error(errors.alertTo)}
+    </label>
+    <p class="hint">An alert says which wish was not sent, and why: as soon as WhatsApp refuses one, or the next morning, at the reminder time, when a day ended while this computer was off or asleep or WhatsApp was not connected. While WhatsApp is not connected, alerts wait for it too. They come from the linked number, so sent to that number itself they land in Message yourself without a notification; in a group, everyone there sees them.</p>
+    <div class="form__actions">
+      <button type="submit" form="test-alert" class="button button--quiet button--small" data-confirm="Send a test alert now, to where alerts go as last saved?">Send a test alert</button>
+      <span class="hint">Goes where alerts go, as last saved.</span>
+    </div>
+  </fieldset>
+
   <fieldset class="settings-group">
     <legend>Time and numbers</legend>
     <div class="field-row">
@@ -740,6 +786,7 @@ ${whatsappSection(wa)}
 
   <div class="form__actions"><button type="submit" class="button">Save changes</button></div>
 </form>
+<form method="post" action="/settings/test-alert" id="test-alert" hidden></form>
 
 <section class="card" id="password" aria-labelledby="password-title">
   <h2 class="settings-title" id="password-title">Password</h2>

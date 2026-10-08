@@ -108,3 +108,77 @@ function quoted(text) {
     .map((line) => `> ${line}`)
     .join("\n");
 }
+
+/* ----------------------------------------------------------------- alerts */
+
+/* When a wish is not sent, the app says so on WhatsApp: which, to where,
+ * and why. An alert's first line is its title; the Today page shows it. */
+const alertTitle = (what) => `⚠️ *Wish Calendar: ${what}*`;
+const ALERT_TITLE = /^⚠️ \*Wish Calendar: (.+)\*$/;
+
+/* "a wish was not sent", from an alert's text. */
+export function alertSummary(text) {
+  return ALERT_TITLE.exec(String(text ?? "").split("\n")[0])?.[1] ?? "an alert";
+}
+
+/* A message an alert is about: whose, to where, at what time. */
+function alertLine(job) {
+  const what = job.kind === "reminder" ? "🗓️ *Your morning reminder*" : `${KIND_ICON[job.person.kind] ?? "🎂"} *${job.person.name}*`;
+  return `${what} → ${job.to.label} · ${job.time}`;
+}
+
+function notSent(items) {
+  const wishes = items.filter((item) => item.job.kind === "wish").length;
+  if (items.length === 1) return wishes ? "a wish was not sent" : "your reminder was not sent";
+  return `${items.length} ${wishes === items.length ? "wishes" : "messages"} were not sent`;
+}
+
+/* Today's messages that WhatsApp refused. items: [{job, delivery}], each
+ * delivery as the refusal left it — its tries, and the reason in words. */
+export function renderRefusedAlert({ items, maxAttempts }) {
+  const lines = [alertTitle(notSent(items))];
+  for (const { job, delivery } of items) {
+    const left = Math.max(0, maxAttempts - delivery.attempts);
+    lines.push(
+      "",
+      alertLine(job),
+      delivery.error,
+      left ? `It is tried again every 10 minutes, ${left} more ${left === 1 ? "time" : "times"}.` : "It won’t be tried again on its own.",
+    );
+  }
+  lines.push("", `To send ${items.length === 1 ? "it" : "them"} now: Wish Calendar → Today → Retry now.`);
+  return lines.join("\n");
+}
+
+/* Why a wish of a day gone by was not sent, from its delivery row — none
+ * when it was never tried. */
+function missedReason(delivery) {
+  if (!delivery) return "Not tried before the day ended: this computer was off or asleep, or WhatsApp was not connected.";
+  if (delivery.status === "sending") return "The app stopped while sending it, so it may not have gone out.";
+  return delivery.error || "WhatsApp did not take it.";
+}
+
+/* The wishes of days gone by that were not sent. days: [{date, items:
+ * [{job, delivery}]}], oldest first. Wishes missed for the same reason are
+ * listed together, and the reason said once. */
+export function renderMissedAlert({ days }) {
+  const items = days.flatMap((d) => d.items);
+  const lines = [alertTitle(`${notSent(items)}${days.length === 1 ? ` on ${formatShortDate(days[0].date)}` : ""}`)];
+  for (const day of days) {
+    lines.push("");
+    if (days.length > 1) lines.push(`*${formatShortDate(day.date)}*`);
+    const byReason = new Map();
+    for (const { job, delivery } of day.items) {
+      const reason = missedReason(delivery);
+      byReason.set(reason, [...(byReason.get(reason) ?? []), job]);
+    }
+    [...byReason].forEach(([reason, jobs], i) => lines.push(...(i ? [""] : []), ...jobs.map(alertLine), reason));
+  }
+  lines.push("", "To wish them late: Wish Calendar → People → Send now.");
+  return lines.join("\n");
+}
+
+/* "Send a test alert" on the Settings page. */
+export function renderTestAlert() {
+  return [alertTitle("test alert"), "", "This is how an alert looks. When a wish can’t be sent, one like it comes here, saying which wish and why."].join("\n");
+}

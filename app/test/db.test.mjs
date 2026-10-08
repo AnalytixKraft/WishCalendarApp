@@ -92,3 +92,29 @@ test("updateMany saves the People table in one go", () => {
   assert.equal(changed, 2);
   assert.deepEqual([db.people.get(a).sendTo, db.people.get(a).phone, db.people.get(a).sendTime, db.people.get(b).sendTo, db.people.get(b).sendTime], ["direct", "447700900001", "09:30", "9@g.us", ""]);
 });
+
+test("migration 5 keeps what was sent, and makes room for alerts", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bdr-"));
+  try {
+    const file = join(dir, "birthdays.db");
+    firstVersionDb(file);
+    const raw = new DatabaseSync(file);
+    raw.exec(`INSERT INTO deliveries (key, day, kind, person_id, person_name, chat_id, chat_subject, status, attempts, message_id, created_at, updated_at)
+      VALUES ('wish:2026-09-30:1', '2026-09-30', 'wish', 1, 'Anu', '1@g.us', 'Youth', 'sent', 1, 'M1', '2026-09-30T02:30:00Z', '2026-09-30T02:30:01Z')`);
+    raw.close();
+    const db = openDb(file);
+    const kept = db.deliveries.get("wish:2026-09-30:1");
+    assert.deepEqual([kept.status, kept.message_id, kept.chat_subject, kept.updated_at, kept.text, kept.alerted_at], ["sent", "M1", "Youth", "2026-09-30T02:30:01Z", null, null]);
+    db.alerts.create({ key: "alert:wish:2026-09-30:1", day: "2026-09-30", text: "⚠️ *Wish Calendar: a wish was not sent*", about: ["wish:2026-09-30:1"] }, "2026-09-30T03:00:00.000Z");
+    assert.equal(db.deliveries.get("wish:2026-09-30:1").alerted_at, "2026-09-30T03:00:00.000Z");
+    assert.deepEqual(db.alerts.unsent("2026-09-30T00:00:00.000Z").map((a) => [a.key, a.kind, a.status, a.attempts]), [["alert:wish:2026-09-30:1", "alert", "pending", 0]]);
+    assert.deepEqual(db.alerts.unsent("2026-09-30T03:00:00.001Z"), [], "only those made since");
+    assert.equal(db.alerts.checkedThrough(), null);
+    db.alerts.setCheckedThrough("2026-09-29");
+    assert.equal(db.alerts.checkedThrough(), "2026-09-29");
+    assert.equal(db.settings.get().alertTo, "self", "alerts go to the linked phone unless changed");
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

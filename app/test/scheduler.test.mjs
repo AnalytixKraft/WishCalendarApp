@@ -11,6 +11,8 @@ const CHOIR = "120363000000000002@g.us";
 const ANU_PHONE = "447700900001";
 const MY_PHONE = "447700900099";
 const LINKED_PHONE = "447700900077";
+// Everyone in setup() was on the list well before these days.
+const ADDED = "2026-09-01T00:00:00Z";
 
 /* Stands in for the WhatsApp bridge. Nothing here reaches WhatsApp. */
 function fakeBridge() {
@@ -42,10 +44,10 @@ function setup(now = "2026-09-30T03:00:00Z") {
     { id: YOUTH, subject: "Youth" },
     { id: CHOIR, subject: "Choir" },
   ]);
-  const anu = db.people.create({ name: "Anu Joseph", day: 30, month: 9, year: 1996, phone: ANU_PHONE, sendTo: "direct", message: "Happy {ordinal_age}, {first_name}! 🎂" });
-  const biju = db.people.create({ name: "Biju", day: 30, month: 9, sendTo: YOUTH });
-  const cara = db.people.create({ name: "Cara", day: 30, month: 9 });
-  const dev = db.people.create({ name: "Dev", day: 1, month: 10, sendTo: CHOIR });
+  const anu = db.people.create({ name: "Anu Joseph", day: 30, month: 9, year: 1996, phone: ANU_PHONE, sendTo: "direct", message: "Happy {ordinal_age}, {first_name}! 🎂", createdAt: ADDED });
+  const biju = db.people.create({ name: "Biju", day: 30, month: 9, sendTo: YOUTH, createdAt: ADDED });
+  const cara = db.people.create({ name: "Cara", day: 30, month: 9, createdAt: ADDED });
+  const dev = db.people.create({ name: "Dev", day: 1, month: 10, sendTo: CHOIR, createdAt: ADDED });
   return { db, bridge, scheduler, anu, biju, cara, dev, at: (iso) => (clock = new Date(iso)) };
 }
 
@@ -265,4 +267,176 @@ test("a preview goes to my number — or, without one, to the linked phone", asy
   db.settings.save({ myPhone: MY_PHONE });
   await scheduler.sendPreview(db.people.get(anu));
   assert.equal(bridge.sent[1].chatId, `${MY_PHONE}@s.whatsapp.net`);
+});
+
+/* ---------------------------------------------------------------- alerts */
+
+const alertsSent = (bridge) => bridge.sent.filter((s) => s.key.startsWith("alert:"));
+
+test("a wish refused for a reason someone must fix: an alert at once, to the linked phone, and once", async () => {
+  const { db, bridge, scheduler, biju, at } = setup(); // 08:30 IST
+  bridge.failWith.set(YOUTH, new BridgeError({ code: "not_a_member" }));
+  await scheduler.run();
+  assert.deepEqual(
+    bridge.sent.map((s) => s.key.split(":")[0]),
+    ["wish", "alert"],
+    "the wishes first, then the alert",
+  );
+  const [alert] = alertsSent(bridge);
+  assert.equal(alert.key, `alert:wish:2026-09-30:${biju}`);
+  assert.equal(alert.chatId, `${LINKED_PHONE}@s.whatsapp.net`);
+  assert.equal(
+    alert.text,
+    [
+      "⚠️ *Wish Calendar: a wish was not sent*",
+      "",
+      "🎂 *Biju* → Youth · 08:00",
+      "The linked WhatsApp number is not a member of this group. Add it to the group, then retry.",
+      "It is tried again every 10 minutes, 5 more times.",
+      "",
+      "To send it now: Wish Calendar → Today → Retry now.",
+    ].join("\n"),
+  );
+  for (const t of ["2026-09-30T03:10:00Z", "2026-09-30T03:20:00Z"]) {
+    at(t);
+    await scheduler.run();
+  }
+  assert.equal(db.deliveries.get(`wish:2026-09-30:${biju}`).attempts, 3);
+  assert.equal(alertsSent(bridge).length, 1, "the same refusal again is not told again");
+});
+
+test("a wish refused for any other reason: one alert, when its last try fails", async () => {
+  const { bridge, scheduler, at } = setup();
+  bridge.failWith.set(YOUTH, new BridgeError({ code: "send_failed", detail: "timed out" }));
+  let t = Date.parse("2026-09-30T03:00:00Z");
+  for (let i = 1; i <= MAX_ATTEMPTS; i++, t += 10 * 60_000) {
+    at(new Date(t).toISOString());
+    await scheduler.run();
+    assert.equal(alertsSent(bridge).length, i === MAX_ATTEMPTS ? 1 : 0, `after try ${i}`);
+  }
+  assert.match(alertsSent(bridge)[0].text, /\nWhatsApp did not take the message: timed out\nIt won’t be tried again on its own\.\n/);
+});
+
+test("no alerts when they are off, or while sending is paused", async () => {
+  const { db, bridge, scheduler, at } = setup();
+  db.settings.save({ alertTo: "" });
+  bridge.failWith.set(YOUTH, new BridgeError({ code: "not_a_member" }));
+  await scheduler.run();
+  db.settings.save({ alertTo: "self", enabled: false });
+  at("2026-09-30T03:30:00Z");
+  await scheduler.run({ force: true }); // Send today's messages now, while paused
+  assert.equal(alertsSent(bridge).length, 0);
+});
+
+test("wishes of a day that ended before they went: one alert the next morning, waiting for WhatsApp, told once", async () => {
+  const { db, bridge, scheduler, at } = setup("2026-09-29T03:00:00Z"); // the day before; the app is running
+  await scheduler.run();
+  // Added on 1 Oct: too late for 30 Sep, so not "missed".
+  db.people.create({ name: "Eva", day: 30, month: 9, sendTo: CHOIR, createdAt: "2026-10-01T00:30:00Z" });
+  // The computer sleeps through 30 Sep; WhatsApp is down when it wakes.
+  bridge.state = "idle";
+  at("2026-10-01T01:00:00Z"); // 06:30 IST, before the reminder time (07:00)
+  await scheduler.run();
+  assert.equal(db.deliveries.get("alert:missed:2026-09-30"), null, "not before the reminder time");
+
+  at("2026-10-01T01:31:00Z"); // 07:01 IST
+  assert.equal((await scheduler.run()).outcome, "waiting");
+  assert.equal(db.deliveries.get("alert:missed:2026-09-30").status, "pending");
+  assert.equal(alertsSent(bridge).length, 0);
+
+  bridge.state = "open";
+  at("2026-10-01T01:32:00Z");
+  await scheduler.run();
+  const alerts = alertsSent(bridge);
+  assert.deepEqual(alerts.map((a) => [a.key, a.chatId]), [["alert:missed:2026-09-30", `${LINKED_PHONE}@s.whatsapp.net`]]);
+  assert.equal(
+    alerts[0].text,
+    [
+      "⚠️ *Wish Calendar: 2 wishes were not sent on Wed 30 Sep*",
+      "",
+      "🎂 *Anu Joseph* → +447700900001 · 08:00",
+      "🎂 *Biju* → Youth · 08:00",
+      "Not tried before the day ended: this computer was off or asleep, or WhatsApp was not connected.",
+      "",
+      "To wish them late: Wish Calendar → People → Send now.",
+    ].join("\n"),
+  );
+
+  at("2026-10-01T05:00:00Z"); // later that day: Dev's wish goes, no more alerts
+  await scheduler.run();
+  assert.ok(bridge.sent.some((s) => s.key.startsWith("wish:2026-10-01:")));
+  assert.equal(alertsSent(bridge).length, 1);
+});
+
+test("the next morning tells of a wish still failing when its day ended — with why — and not one already told", async () => {
+  const { db, bridge, scheduler, anu, biju, at } = setup(); // 30 Sep, 08:30 IST
+  db.alerts.setCheckedThrough("2026-09-29");
+  bridge.failWith.set(`${ANU_PHONE}@s.whatsapp.net`, new BridgeError({ code: "not_on_whatsapp" })); // told at once
+  bridge.failWith.set(YOUTH, new BridgeError({ code: "send_failed", detail: "timed out" })); // tries left: not yet
+  await scheduler.run();
+  assert.deepEqual(alertsSent(bridge).map((a) => a.key), [`alert:wish:2026-09-30:${anu}`]);
+
+  bridge.state = "idle"; // and WhatsApp is gone for the rest of the day
+  at("2026-09-30T12:00:00Z");
+  await scheduler.run();
+  bridge.state = "open";
+  at("2026-10-01T01:31:00Z"); // 07:01 IST the next day
+  await scheduler.run();
+  const [, morning] = alertsSent(bridge);
+  assert.equal(morning.key, "alert:missed:2026-09-30");
+  assert.equal(
+    morning.text,
+    [
+      "⚠️ *Wish Calendar: a wish was not sent on Wed 30 Sep*",
+      "",
+      "🎂 *Biju* → Youth · 08:00",
+      "WhatsApp did not take the message: timed out",
+      "",
+      "To wish them late: Wish Calendar → People → Send now.",
+    ].join("\n"),
+  );
+  assert.ok(db.deliveries.get(`wish:2026-09-30:${biju}`).alerted_at);
+});
+
+test("a new install looks back no further than today; so does sending turned back on", async () => {
+  const { db, bridge, scheduler } = setup("2026-10-01T01:31:00Z"); // 07:01 IST on 1 Oct: 30 Sep's wishes never went
+  await scheduler.run();
+  assert.equal(alertsSent(bridge).length, 0);
+  assert.equal(db.alerts.checkedThrough(), "2026-10-01");
+
+  db.alerts.setCheckedThrough("2026-09-20"); // as if sending had been off since then
+  scheduler.sendingTurnedOn();
+  assert.equal(db.alerts.checkedThrough(), "2026-09-30");
+  await scheduler.run();
+  assert.equal(alertsSent(bridge).length, 0);
+});
+
+test("an alert that could not go for 3 days is dropped, and says so on the page", async () => {
+  const { db, bridge, scheduler } = setup("2026-09-30T20:00:00Z"); // 01:30 IST on 1 Oct
+  db.alerts.create({ key: "alert:missed:2026-09-26", day: "2026-09-27", text: "⚠️ *Wish Calendar: a wish was not sent on Sat 26 Sep*" }, "2026-09-27T01:31:00.000Z");
+  await scheduler.run();
+  assert.equal(alertsSent(bridge).length, 0);
+  const dropped = db.deliveries.get("alert:missed:2026-09-26");
+  assert.equal(dropped.status, "failed");
+  assert.match(dropped.error, /^Dropped: it could not go out within 3 days/);
+});
+
+test("a test alert goes where alerts go, and is never sent again on its own", async () => {
+  const { db, bridge, scheduler, at } = setup();
+  db.settings.save({ alertTo: "direct", myPhone: MY_PHONE });
+  const to = await scheduler.sendTestAlert();
+  assert.equal(to.id, `${MY_PHONE}@s.whatsapp.net`);
+  assert.match(bridge.sent.at(-1).text, /^⚠️ \*Wish Calendar: test alert\*\n\nThis is how an alert looks/);
+  assert.match(db.deliveries.get(bridge.sent.at(-1).key).text, /test alert/);
+
+  at("2026-09-30T03:01:00Z");
+  bridge.failWith.set(`${MY_PHONE}@s.whatsapp.net`, new BridgeError({ code: "send_failed" }));
+  await assert.rejects(scheduler.sendTestAlert(), BridgeError);
+  bridge.failWith.clear();
+  at("2026-09-30T04:00:00Z");
+  await scheduler.run();
+  assert.equal(bridge.sent.filter((s) => s.key.startsWith("alert:test:")).length, 1, "the failed one is not retried");
+
+  db.settings.save({ alertTo: "" });
+  await assert.rejects(scheduler.sendTestAlert(), NotSendable);
 });

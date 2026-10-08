@@ -289,6 +289,7 @@ export async function createApp({ config, problems = [], db, bridge, scheduler, 
         settings,
         wa: await waStatus(), // first: it tells the scheduler who is linked
         reminderLabel: destinationOf(settings.reminderTo, settings.myPhone, db.chats.names())?.label ?? null,
+        alertLabel: destinationOf(settings.alertTo, settings.myPhone, db.chats.names())?.label ?? null,
         agenda: scheduler.agenda(),
         upcoming: upcomingBirthdays(people, date, 30),
         recent: db.deliveries.recent(15),
@@ -626,6 +627,17 @@ export async function createApp({ config, problems = [], db, bridge, scheduler, 
     });
   }
 
+  /* Settings → Alerts → Send a test alert: to where alerts go, as saved. */
+  async function testAlert(ctx) {
+    await readForm(ctx.req);
+    try {
+      const to = await scheduler.sendTestAlert();
+      ctx.back("/settings", "ok", `Test alert sent to ${to.label}.`);
+    } catch (err) {
+      ctx.back("/settings", "error", `The test alert was not sent: ${err instanceof NotSendable ? err.message : describeError(err)}`);
+    }
+  }
+
   function settingsForm(ctx) {
     const values = db.settings.get();
     return renderSettings(ctx, { values: { ...values, myPhone: formatPhone(values.myPhone) } });
@@ -644,6 +656,9 @@ export async function createApp({ config, problems = [], db, bridge, scheduler, 
       anniversaryTemplate: readMessage(form, "anniversaryTemplate"),
       myPhone: form.get("myPhone"),
       reminderTo: form.get("reminderTo"),
+      // A Settings page opened before alerts existed has no such field: saving
+      // it keeps them as they are, rather than turning them off.
+      alertTo: form.has("alertTo") ? form.get("alertTo") : before.alertTo,
       countryCode: form.get("countryCode").replace(/^\+/, ""),
     };
     const errors = {};
@@ -658,6 +673,8 @@ export async function createApp({ config, problems = [], db, bridge, scheduler, 
     if (myPhone.error) errors.myPhone = myPhone.error;
     const reminderTo = readSendTo(values.reminderTo, myPhone.phone, { direct: "your", self: true });
     if (reminderTo.error && !myPhone.error) errors.reminderTo = reminderTo.error;
+    const alertTo = readSendTo(values.alertTo, myPhone.phone, { direct: "your", self: true });
+    if (alertTo.error && !myPhone.error) errors.alertTo = alertTo.error;
     if (Object.keys(errors).length) return renderSettings(ctx, { status: 422, values, errors });
 
     db.settings.save({
@@ -667,9 +684,11 @@ export async function createApp({ config, problems = [], db, bridge, scheduler, 
       anniversaryTemplate: values.anniversaryTemplate || DEFAULT_ANNIVERSARY_TEMPLATE,
       myPhone: myPhone.phone,
       reminderTo: reminderTo.sendTo,
+      alertTo: alertTo.sendTo,
     });
     let text = "Settings saved.";
     if (values.enabled && !before.enabled) {
+      scheduler.sendingTurnedOn();
       const due = scheduler.agenda().filter((job) => job.to && job.due && job.delivery?.status !== "sent");
       text = due.length ? `Sending is on. ${plural(due.length, "message")} due today will go out within a minute.` : "Sending is on.";
     } else if (!values.enabled && before.enabled) {
@@ -701,6 +720,7 @@ export async function createApp({ config, problems = [], db, bridge, scheduler, 
     ["GET", /^\/settings$/, settingsForm],
     ["POST", /^\/settings\/messages$/, defaultMessagesSave],
     ["POST", /^\/settings\/password$/, passwordSave],
+    ["POST", /^\/settings\/test-alert$/, testAlert],
     ["POST", /^\/settings$/, settingsSave],
   ];
 
