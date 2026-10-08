@@ -1,8 +1,9 @@
 # WhatsApp bridge
 
-A small container that holds one WhatsApp **linked-device** session and can do
-exactly one thing with it: send text — into a group, or to a person by phone
-number. The app decides what to send, to whom and when; this delivers it. Service `whatsapp` in
+A small container that holds one WhatsApp **linked-device** session and does
+two things with it: send text — into a group, or to a person by phone number —
+and hand the app the **📅 messages** the account's owner sends, to put on the
+calendar. The app decides what to send, to whom and when; this delivers it. Service `whatsapp` in
 [`../docker-compose.yml`](../docker-compose.yml).
 
 ```
@@ -30,8 +31,19 @@ keeping the text path only, and adding messages to people's numbers.
   (`onWhatsApp`, asked once a day per number), and at most **30 an hour**:
   direct messages from an unofficial client are what WhatsApp's spam checks
   look for, and the cap keeps a loop or a leaked token from becoming a burst.
-- Never reads, stores or reacts to anything inbound: no message handler, no
-  history sync, no message store. Baileys is told to drop everything that is
+- Acts on one kind of inbound message only: a **📅 message** — one the linked
+  account sent *itself* (from the phone, or another of its devices), into a
+  group or into its own chat (*Message yourself*), starting with 📅 or 📆
+  ([`src/commands.mjs`](src/commands.mjs)). Its text, and the text of the
+  message it replies to, are held in memory — never on disk, never in the
+  log — until the app takes them (`GET /commands`, `POST /commands/ack`): at
+  most 100, for at most 3 days. Every other message is let go of as it
+  arrives, unread beyond that check: above all, **everything anyone else
+  sends** — no one else can put anything on the calendar. What the bridge
+  sends itself never comes back to it as an incoming message
+  (`emitOwnEvents: false`), and nothing it sends starts with 📅 or 📆.
+- Otherwise reads, stores and reacts to nothing inbound: no history sync, no
+  message store. Baileys is told to drop everything that is
   not from a group, from the linked account itself, or from someone the bridge
   has sent a direct message to **before decrypting it** (`shouldIgnoreJid` →
   `ignoresSender` in [`src/session.mjs`](src/session.mjs)). That last set is
@@ -40,7 +52,7 @@ keeping the text path only, and adding messages to people's numbers.
   their phone-number JID and, once WhatsApp has said, their LID, in memory
   only. What members post in a group the number is in, and a reply from
   someone it messaged, are still decrypted — the hook sees only the JID — and
-  nothing acts on either.
+  nothing acts on either: only the owner's own 📅 messages are kept.
 - Publishes no port and is not in the tunnel: only the app, on the `whatsapp`
   compose network, can reach it — and every call but `/healthz` needs the token
   anyway.
@@ -86,11 +98,13 @@ is something to add.
 | | |
 |---|---|
 | `GET /healthz` | `200 {"ok":true}` while the process is alive. No auth, no state: the container healthcheck. |
-| `GET /status` | `200 {"state","me","qr","qr_expires_at","since","last_error","baileys_version","wa_version","features"}`. `me` is `{"id","name"}` once linked; `qr` is the raw QR payload while `pairing`, else `null`. `features` is `["text"]`. |
+| `GET /status` | `200 {"state","me","qr","qr_expires_at","since","last_error","baileys_version","wa_version","features"}`. `me` is `{"id","name"}` once linked; `qr` is the raw QR payload while `pairing`, else `null`. `features` is `["text","commands"]`. |
 | `POST /pair` | Starts pairing if `idle`; a no-op otherwise. Returns the status body at once — poll `/status` for the QR. |
 | `POST /logout` | Unlinks: tells WhatsApp if connected (so the phone's list drops the device), wipes `/data/auth`, → `idle`. |
 | `GET /groups` | `200 {"groups":[{"id","subject","participants","announce","is_admin"}]}`, sorted by subject. `409 not_connected` unless `open`; `502 groups_failed` if WhatsApp does not answer. |
 | `POST /send` | `{"chat_id","text","idempotency_key"}` → `200 {"message_id","chat_id","deduplicated"}`. `chat_id` is a group (`…@g.us`) or a phone number (`919876543210@s.whatsapp.net`). |
+| `GET /commands` | `200 {"commands":[{"id","chat","chat_id","sent_at","text","quoted"}]}`: the 📅 messages held, oldest first. `chat` is `group` or `self`; `text` is what follows the 📅; `quoted` the text of the message it replies to, or `null`. In any state — it is the bridge's memory, not a call to WhatsApp. |
+| `POST /commands/ack` | `{"ids":[…]}` → `200 {"acked"}`: the app has these; let them go. `400 invalid_ids` unless an array of up to 500 non-empty strings. The app's poller is the one caller: anything else taking them takes them off the calendar. |
 
 `/send` refuses, in this order:
 
@@ -121,6 +135,9 @@ out twice.
 ```bash
 docker compose logs --tail 50 whatsapp   # JSON lines; never the token, a QR or a message's text
 ```
+
+`📅 message held for the app` (with `chat` and `message_id`) is a 📅 message
+the owner sent; the app takes it within 15 seconds.
 
 ```bash
 docker compose restart whatsapp          # keeps the link (a stop is never a logout)

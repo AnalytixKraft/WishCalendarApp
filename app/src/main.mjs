@@ -4,6 +4,7 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { createBridge } from "./bridge.mjs";
+import { createCapture } from "./capture.mjs";
 import { loadConfig } from "./config.mjs";
 import { openDb } from "./db.mjs";
 import { log } from "./log.mjs";
@@ -18,6 +19,7 @@ const db = openDb(join(config.dataDir, "birthdays.db"), {
 });
 const bridge = createBridge({ url: config.bridgeUrl, token: config.bridgeToken });
 const scheduler = createScheduler({ db, bridge, log });
+const capture = createCapture({ db, bridge, scheduler, log });
 const server = await createApp({ config, problems, db, bridge, scheduler, log });
 
 server.listen(config.port, config.host, () => {
@@ -31,12 +33,14 @@ if (problems.length) {
 } else {
   if (!config.bridgeToken) log.warn("BRIDGE_TOKEN is not set, so WhatsApp cannot be reached. Run bash scripts/setup.sh, then docker compose up -d.");
   scheduler.start();
+  capture.start();
 }
 
 for (const signal of ["SIGTERM", "SIGINT"]) {
   process.once(signal, () => {
     log.info({ signal }, "stopping");
     scheduler.stop();
+    capture.stop();
     server.close();
     db.close();
     process.exit(0);

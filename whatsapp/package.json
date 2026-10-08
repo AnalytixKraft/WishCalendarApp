@@ -6,6 +6,9 @@
   "license": "MIT",
   "type": "module",
   "main": "src/main.mjs",
+  "scripts": {
+    "test": "node --test"
+  },
   "engines": {
     "node": ">=24"
   },

@@ -522,3 +522,16 @@ test("Settings: calendar messages go to the linked phone unless changed, apart f
   assert.equal(db.settings.get().calendarTo, "");
   db.settings.save({ calendarTo: "self" });
 });
+
+test("Settings: 📅 messages from WhatsApp go on the calendar unless switched off", async () => {
+  const cookie = await signIn();
+  const page = await (await get("/settings", cookie)).text();
+  assert.match(page, /<input type="checkbox" name="capture" value="1" checked> <span><strong>Add to my calendar from WhatsApp<\/strong>/);
+  const base = { wishTime: "08:00", reminderTime: "07:00", timezone: "Asia/Kolkata", daysAhead: "1", countryCode: "91", template: "", reminderTo: "", myPhone: "", alertTo: "self", calendarTo: "self" };
+  assert.equal((await post("/settings", base, { cookie })).status, 303);
+  assert.equal(db.settings.get().capture, true, "a page from before the switch keeps it");
+  assert.equal((await post("/settings", { ...base, captureShown: "1" }, { cookie })).status, 303);
+  assert.equal(db.settings.get().capture, false, "unticked");
+  assert.equal((await post("/settings", { ...base, captureShown: "1", capture: "1" }, { cookie })).status, 303);
+  assert.equal(db.settings.get().capture, true);
+});

@@ -236,6 +236,48 @@ const MIGRATIONS = [
   CREATE INDEX deliveries_by_day ON deliveries (day);
   CREATE INDEX deliveries_by_update ON deliveries (updated_at);
   `,
+
+  // 8 — 📅 messages: what you send on WhatsApp to put on the calendar
+  // (capture.mjs). One row each, keyed by WhatsApp's message id, so none is
+  // added twice; and what it became — an event or a task, or nothing while
+  // that is switched off (kind NULL). Their answer, in Message yourself, is
+  // a message too: kind 'capture'.
+  `
+  CREATE TABLE captures (
+    message_id TEXT    PRIMARY KEY,
+    chat_id    TEXT    NOT NULL,
+    sent_at    TEXT    NOT NULL,
+    text       TEXT    NOT NULL,
+    quoted     TEXT,
+    kind       TEXT    CHECK (kind IS NULL OR kind IN ('event', 'task')),
+    item_id    INTEGER,
+    created_at TEXT    NOT NULL DEFAULT (${NOW})
+  );
+
+  CREATE TABLE deliveries_8 (
+    key          TEXT    PRIMARY KEY,
+    day          TEXT    NOT NULL,
+    kind         TEXT    NOT NULL CHECK (kind IN ('wish', 'reminder', 'test', 'alert', 'event', 'agenda', 'capture')),
+    person_id    INTEGER,
+    person_name  TEXT,
+    chat_id      TEXT    NOT NULL,
+    chat_subject TEXT    NOT NULL DEFAULT '',
+    status       TEXT    NOT NULL CHECK (status IN ('pending', 'sending', 'sent', 'failed')),
+    attempts     INTEGER NOT NULL DEFAULT 0,
+    message_id   TEXT,
+    error        TEXT,
+    created_at   TEXT    NOT NULL DEFAULT (${NOW}),
+    updated_at   TEXT    NOT NULL DEFAULT (${NOW}),
+    text         TEXT,
+    alerted_at   TEXT,
+    title        TEXT
+  );
+  INSERT INTO deliveries_8 SELECT key, day, kind, person_id, person_name, chat_id, chat_subject, status, attempts, message_id, error, created_at, updated_at, text, alerted_at, title FROM deliveries;
+  DROP TABLE deliveries;
+  ALTER TABLE deliveries_8 RENAME TO deliveries;
+  CREATE INDEX deliveries_by_day ON deliveries (day);
+  CREATE INDEX deliveries_by_update ON deliveries (updated_at);
+  `,
 ];
 
 function migrate(db) {
@@ -406,6 +448,7 @@ export function openDb(file, { defaultTimezone = "Asia/Kolkata" } = {}) {
     reminder_to: "",
     alert_to: "self",
     calendar_to: "self",
+    capture: "1",
     my_phone: "",
     country_code: "91",
   };
@@ -425,11 +468,12 @@ export function openDb(file, { defaultTimezone = "Asia/Kolkata" } = {}) {
         reminderTo: values.reminder_to, // '' (no reminder) | 'self' (the linked phone) | 'direct' (my number) | a group id
         alertTo: values.alert_to, // the same choices; '' is no alerts
         calendarTo: values.calendar_to, // the same again: where "Your day" and event reminders go
+        capture: values.capture === "1", // 📅 messages you send on WhatsApp go on the calendar
         myPhone: values.my_phone,
         countryCode: values.country_code,
       };
     },
-    save({ enabled, wishTime, reminderTime, timezone, daysAhead, template, anniversaryTemplate, reminderTo, alertTo, calendarTo, myPhone, countryCode }) {
+    save({ enabled, wishTime, reminderTime, timezone, daysAhead, template, anniversaryTemplate, reminderTo, alertTo, calendarTo, capture, myPhone, countryCode }) {
       const upsert = q("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value");
       const values = {
         enabled: enabled === undefined ? undefined : enabled ? "1" : "0",
@@ -442,6 +486,7 @@ export function openDb(file, { defaultTimezone = "Asia/Kolkata" } = {}) {
         reminder_to: reminderTo,
         alert_to: alertTo,
         calendar_to: calendarTo,
+        capture: capture === undefined ? undefined : capture ? "1" : "0",
         my_phone: myPhone,
         country_code: countryCode,
       };
@@ -660,5 +705,22 @@ export function openDb(file, { defaultTimezone = "Asia/Kolkata" } = {}) {
     remove: (id) => q("DELETE FROM tasks WHERE id = ?").run(id).changes > 0,
   };
 
-  return { people, chats, settings, password, deliveries, alerts, notes, journal, events, tasks, transaction, close: () => db.close() };
+  /* 📅 messages taken from the bridge: each once. */
+  const captures = {
+    has: (messageId) => Boolean(q("SELECT 1 FROM captures WHERE message_id = ?").get(messageId)),
+    record: ({ id, chat_id: chatId, sent_at: sentAt, text, quoted }, kind = null, itemId = null) =>
+      q("INSERT OR IGNORE INTO captures (message_id, chat_id, sent_at, text, quoted, kind, item_id) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
+        id,
+        chatId,
+        sentAt,
+        text,
+        quoted,
+        kind,
+        itemId,
+      ).changes > 0,
+    /* Kept a month: long after the bridge has let the message go. */
+    prune: (before) => q("DELETE FROM captures WHERE created_at < ?").run(before).changes,
+  };
+
+  return { people, chats, settings, password, deliveries, alerts, notes, journal, events, tasks, captures, transaction, close: () => db.close() };
 }

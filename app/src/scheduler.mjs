@@ -513,6 +513,18 @@ export function createScheduler({ db, bridge, log, clock = () => new Date(), pau
     return to;
   }
 
+  /* The answer to a 📅 message (capture.mjs): to the linked phone's own
+   * chat — Message yourself — never the group it came from. It goes while
+   * sending is paused too, like Send now: it answers something its owner
+   * just did. Once per key. */
+  async function sendToSelf({ key, title, text }) {
+    if (db.deliveries.get(key)?.status === "sent") return;
+    await openStatus();
+    const to = destinationOf("self", "", new Map(), linkedPhone);
+    if (!to?.id) throw new NotSendable("WhatsApp has not said which number is linked yet.");
+    await deliverOne({ key, day: isoDate(today().date), kind: "capture", person: null, title, to }, text);
+  }
+
   function start() {
     const tick = () => run().catch((err) => log.error({ err: err?.stack || String(err) }, "scheduler tick failed"));
     setTimeout(tick, 5_000);
@@ -528,6 +540,7 @@ export function createScheduler({ db, bridge, log, clock = () => new Date(), pau
     sendNow,
     sendPreview,
     sendTestAlert,
+    sendToSelf,
     sendingTurnedOn,
     agenda,
     today,

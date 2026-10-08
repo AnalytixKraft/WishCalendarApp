@@ -1,14 +1,16 @@
 /* The WhatsApp side of the bridge: one Baileys linked-device session, the
- * state machine around it, and the only three things the API may ask of it —
- * link a phone, list the groups it is in, post text into a group or to a
- * person by phone number.
+ * state machine around it, and the only things the API may ask of it — link
+ * a phone, list the groups it is in, post text into a group or to a person by
+ * phone number, and hand over the "📅 messages" the account's owner sent
+ * (commands.mjs says exactly which messages those are, and nothing else
+ * inbound is acted on).
  *
  * Adapted from the WhatsApp bridge AnalytixKraft runs for its bug tracker
  * (itself lifted from AnalytixKraft/medha), keeping only what a few messages
  * a day need: the multi-file auth store and its save queue, the creds.json
  * backup, QR pairing with the 515 restart, and a text send. Left behind on
- * purpose: every inbound handler, every kind of media, polls, reactions, and
- * any message store.
+ * purpose: every kind of media, polls, reactions, any message store, and
+ * every inbound handler but the one for 📅 messages.
  *
  * States (the API reports them verbatim; whatsapp/README.md has the table):
  *   idle        no linked device, and NOT trying — no pairing churn against
@@ -34,6 +36,7 @@ import makeWASocket, {
   makeCacheableSignalKeyStore,
   useMultiFileAuthState,
 } from "@whiskeysockets/baileys";
+import { HeldCommands, commandOf } from "./commands.mjs";
 import { BridgeError, TtlCache, baileysLog, log, withTimeout } from "./util.mjs";
 
 /* auth/ under DATA_DIR — the `whatsapp_auth` volume in Docker — is the
@@ -74,8 +77,8 @@ const LOOKUP_TTL_MS = 24 * 60 * 60_000;
 
 const BAILEYS_VERSION = createRequire(import.meta.url)("@whiskeysockets/baileys/package.json").version;
 
-/* What /send can post, in /status. */
-const FEATURES = Object.freeze(["text"]);
+/* What the bridge can do, in /status: post text, and hand over 📅 messages. */
+const FEATURES = Object.freeze(["text", "commands"]);
 
 /* Codes → names, for last_error and the log. 408 is both `timedOut` and
  * `connectionLost` in Baileys' enum; the message beside it disambiguates. */
@@ -205,7 +208,9 @@ function findMe(meta, mine) {
  * NOT closed: messages members post in a group the number is in are still
  * decrypted, and so is a reply from someone it messaged directly. The hook
  * sees only a JID, and those share it with the receipts the send depends on.
- * Nothing acts on either.
+ * Nothing acts on either: the one message the bridge acts on is a 📅 message
+ * the linked account sent itself (commands.mjs), and everything else is let
+ * go of unread.
  *
  * `me` is creds.me, read at each call: Baileys fills it in on the object
  * itself when a pairing succeeds. Before that (pairing) there is no "self",
@@ -284,6 +289,8 @@ export async function startSession() {
   const peers = new Set();
   const directSentAt = [];
   const lookups = new TtlCache(LOOKUP_TTL_MS);
+  /* 📅 messages from the account's owner, until the app takes them. */
+  const held = new HeldCommands();
   /* pair(), logout() and the pairing deadline each read the state, await
    * (a socket ending, the directory being wiped), then act on what they
    * read. Run them one at a time, in arrival order, so none acts on a state
@@ -434,6 +441,13 @@ export async function startSession() {
         // Without this every group send first re-fetches the group's member
         // list from WhatsApp.
         cachedGroupMetadata: async (jid) => groupMetadata.get(jid),
+        // What this bridge sends is not handed back to it as an incoming
+        // message. Baileys does that (as 'append') only for a local message
+        // store, which there is none of; off, a message it sends to its own
+        // chat — "🗓️ Your day", an alert — can never be taken for one the
+        // owner typed (commands.mjs). Re-sends to a member whose phone could
+        // not decrypt come from a cache filled when sending, not from this.
+        emitOwnEvents: false,
         // Everything inbound that is not a group, this account or someone it
         // wrote to is dropped undecrypted — ignoresSender, above, says what
         // that keeps and why.
@@ -447,10 +461,25 @@ export async function startSession() {
       socket.ev.on("connection.update", (update) => {
         if (myGen === gen) onConnectionUpdate(myGen, socket, auth, update);
       });
+      // The one inbound message acted on: a 📅 message the owner sent, from
+      // the phone or another of their devices (commands.mjs, commandOf).
+      // Held for the app; everything else is dropped here, unread beyond
+      // that check. (Not listening is not the same as not decrypting:
+      // shouldIgnoreJid above is what limits that.)
+      socket.ev.on("messages.upsert", ({ messages }) => {
+        if (myGen !== gen) return;
+        try {
+          const mine = myJids(socket);
+          for (const message of messages) {
+            const command = commandOf(message, mine);
+            if (command && held.add(command)) log.info({ chat: command.chat, message_id: command.id }, "📅 message held for the app"); // never its text
+          }
+        } catch (err) {
+          log.warn({ err: describe(err) }, "could not read an incoming message");
+        }
+      });
       // Membership or settings changed: forget what we cached, so the next
-      // send re-reads it. (No messages.upsert handler anywhere — the bridge
-      // acts on no inbound message. Not listening is not the same as not
-      // decrypting, though; shouldIgnoreJid above is what limits that.)
+      // send re-reads it.
       socket.ev.on("groups.update", (updates) => {
         for (const u of updates) if (u.id) groupMetadata.delete(u.id);
       });
@@ -847,6 +876,8 @@ export async function startSession() {
     logout: () => exclusive(logout),
     groups,
     send,
+    commands: () => held.list(),
+    ackCommands: (ids) => held.ack(ids),
     stop,
   };
 }

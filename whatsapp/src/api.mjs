@@ -14,6 +14,8 @@
  *   POST /logout    unlink and wipe the session
  *   GET  /groups    the groups the linked number is in
  *   POST /send      post text into ONE chat: a group, or a phone number
+ *   GET  /commands      the 📅 messages the owner sent, held for the app
+ *   POST /commands/ack  the app has these: let them go
  */
 
 import { createHash, timingSafeEqual } from "node:crypto";
@@ -34,8 +36,8 @@ const DIRECT_JID = /^[1-9]\d{7,14}@s\.whatsapp\.net$/;
 const MAX_TEXT = 20_000;
 const MAX_KEY = 200;
 
-/* Bodies are read into memory whole, so they are capped, and only /send reads
- * one at all. 256 KB holds the text worst case — 20 000 astral characters,
+/* Bodies are read into memory whole, so they are capped, and only /send and
+ * /commands/ack read one at all. 256 KB holds the text worst case — 20 000 astral characters,
  * each \u-escaped as a surrogate pair, is 240 000 bytes — with room for the
  * other fields. A large body is memory held for the asking. */
 const MAX_BODY_BYTES = 256 * 1024;
@@ -46,7 +48,20 @@ const ROUTES = {
   "/logout": "POST",
   "/groups": "GET",
   "/send": "POST",
+  "/commands": "GET",
+  "/commands/ack": "POST",
 };
+
+/* What /commands/ack takes: the ids /commands gave, at most a few hundred. */
+const MAX_ACK = 500;
+
+function parseAck(body) {
+  const { ids } = body;
+  if (!Array.isArray(ids) || ids.length > MAX_ACK || !ids.every((id) => typeof id === "string" && id.length > 0 && id.length <= MAX_KEY)) {
+    throw new BridgeError(400, "invalid_ids");
+  }
+  return ids;
+}
 
 /* Compare digests, not the strings: equal-length buffers, so timingSafeEqual
  * never throws on a wrong-length guess and the comparison leaks neither the
@@ -162,6 +177,10 @@ export function createApi({ token, session }) {
         return reply(res, 200, { groups: await session.groups() });
       case "/send":
         return reply(res, 200, await session.send(parseSend(await readJson(req))));
+      case "/commands":
+        return reply(res, 200, { commands: session.commands() });
+      case "/commands/ack":
+        return reply(res, 200, { acked: session.ackCommands(parseAck(await readJson(req))) });
     }
   }
 

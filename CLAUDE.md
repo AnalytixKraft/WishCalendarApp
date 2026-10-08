@@ -16,7 +16,9 @@ So, against a running app or bridge, an agent never:
 - does anything else that makes WhatsApp deliver a message.
 
 Reading is fine: the bridge's `GET /status` and `GET /healthz`,
-`docker compose logs`, the database. Linking a phone (`POST /pair`) sends
+`docker compose logs`, the database. Never `POST /commands/ack` against a
+running bridge: the app's poller takes the owner's 📅 messages that way, and
+anything else that takes them takes them off the calendar. Linking a phone (`POST /pair`) sends
 nothing, but is only for a bridge that is `idle`, and only when a person asks.
 
 Code that sends is tested against fakes that reach no one: the fake bridges in
