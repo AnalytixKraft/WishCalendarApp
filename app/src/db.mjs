@@ -449,6 +449,8 @@ export function openDb(file, { defaultTimezone = "Asia/Kolkata" } = {}) {
     alert_to: "self",
     calendar_to: "self",
     capture: "1",
+    capture_chats: "self",
+    default_remind: "5",
     my_phone: "",
     country_code: "91",
   };
@@ -469,11 +471,13 @@ export function openDb(file, { defaultTimezone = "Asia/Kolkata" } = {}) {
         alertTo: values.alert_to, // the same choices; '' is no alerts
         calendarTo: values.calendar_to, // the same again: where "Your day" and event reminders go
         capture: values.capture === "1", // 📅 messages you send on WhatsApp go on the calendar
+        captureChats: values.capture_chats.split(" ").filter(Boolean), // where they count: "self" and group ids
+        defaultRemind: values.default_remind === "" ? null : Number(values.default_remind), // minutes before; a new event's reminder
         myPhone: values.my_phone,
         countryCode: values.country_code,
       };
     },
-    save({ enabled, wishTime, reminderTime, timezone, daysAhead, template, anniversaryTemplate, reminderTo, alertTo, calendarTo, capture, myPhone, countryCode }) {
+    save({ enabled, wishTime, reminderTime, timezone, daysAhead, template, anniversaryTemplate, reminderTo, alertTo, calendarTo, capture, captureChats, defaultRemind, myPhone, countryCode }) {
       const upsert = q("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value");
       const values = {
         enabled: enabled === undefined ? undefined : enabled ? "1" : "0",
@@ -487,6 +491,8 @@ export function openDb(file, { defaultTimezone = "Asia/Kolkata" } = {}) {
         alert_to: alertTo,
         calendar_to: calendarTo,
         capture: capture === undefined ? undefined : capture ? "1" : "0",
+        capture_chats: captureChats === undefined ? undefined : captureChats.join(" "),
+        default_remind: defaultRemind === undefined ? undefined : defaultRemind === null ? "" : String(defaultRemind),
         my_phone: myPhone,
         country_code: countryCode,
       };

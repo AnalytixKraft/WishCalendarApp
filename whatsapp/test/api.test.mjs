@@ -5,10 +5,13 @@ import { createApi } from "../src/api.mjs";
 const TOKEN = "t".repeat(40);
 const held = [{ id: "A", chat: "self", chat_id: "447700900077@s.whatsapp.net", sent_at: "2026-10-08T09:59:00.000Z", text: "Lunch 1pm", quoted: null }];
 const acked = [];
+let chats = [];
 /* A session that reaches no one: only the two calls these tests make. */
 const session = {
   status: () => ({ state: "open" }),
   commands: () => held,
+  commandChats: () => chats,
+  setCommandChats: (list) => (chats = [...list].sort()),
   ackCommands: (ids) => {
     acked.push(...ids);
     return ids.length;
@@ -36,7 +39,7 @@ test("📅 messages: only with the token, and only the ids given back are let go
   assert.equal((await call("GET", "/commands", { token: "wrong".repeat(10) })).status, 401);
   const res = await call("GET", "/commands");
   assert.equal(res.status, 200);
-  assert.deepEqual(await res.json(), { commands: held });
+  assert.deepEqual(await res.json(), { commands: held, chats: [] });
   assert.equal((await call("POST", "/commands")).status, 405);
 
   assert.equal((await call("POST", "/commands/ack", { body: { ids: "A" } })).status, 400);
@@ -45,6 +48,16 @@ test("📅 messages: only with the token, and only the ids given back are let go
   const ok = await call("POST", "/commands/ack", { body: { ids: ["A"] } });
   assert.deepEqual(await ok.json(), { acked: 1 });
   assert.deepEqual(acked, ["A"]);
+});
+
+test("the chats 📅 messages count in: Message yourself and groups, nothing else", async () => {
+  for (const bad of [{ chats: "self" }, { chats: ["447700900001@s.whatsapp.net"] }, { chats: ["self", 7] }, {}]) {
+    assert.equal((await call("POST", "/commands/chats", { body: bad })).status, 400, JSON.stringify(bad));
+  }
+  const res = await call("POST", "/commands/chats", { body: { chats: ["self", "120363000000000001@g.us"] } });
+  assert.deepEqual(await res.json(), { chats: ["120363000000000001@g.us", "self"] });
+  assert.deepEqual((await (await call("GET", "/commands")).json()).chats, ["120363000000000001@g.us", "self"]);
+  assert.equal((await call("POST", "/commands/chats", { body: { chats: [] }, token: null })).status, 401);
 });
 
 test("without a token configured, there are no 📅 messages to be had", async () => {

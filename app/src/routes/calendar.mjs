@@ -55,9 +55,9 @@ function readEvent(form) {
   if (values.remind !== "") {
     remind = Number(values.remind);
     if (!REMINDERS.some(([m]) => m === remind)) errors.remind = "Choose a reminder from the list.";
-    else if (!values.time && remind < DAY_MINUTES) {
-      errors.remind = "An all-day event is in “Your day” on the morning itself. Its reminder can be a day or more before — or give it a time.";
-    }
+    // All day: in "Your day" that morning already. A reminder minutes
+    // before it — the one new events start with — is not kept.
+    else if (!values.time && remind < DAY_MINUTES) remind = null;
   }
   if (values.notes.length > MAX_NOTES) errors.notes = `Keep the notes to ${MAX_NOTES.toLocaleString("en")} characters.`;
   return {
@@ -136,8 +136,9 @@ export function calendarRoutes({ db, scheduler, assets }) {
 
   function eventNew(ctx) {
     const day = ctx.url.searchParams.get("day") ?? "";
+    const remind = db.settings.get().defaultRemind;
     renderEvent(ctx, {
-      values: { title: "", day: readDay(day) ? day : todayIso(), endDay: "", time: "", endTime: "", repeat: "", repeatUntil: "", remind: "", notes: "" },
+      values: { title: "", day: readDay(day) ? day : todayIso(), endDay: "", time: "", endTime: "", repeat: "", repeatUntil: "", remind: remind === null ? "" : String(remind), notes: "" },
     });
   }
 

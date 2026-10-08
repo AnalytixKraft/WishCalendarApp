@@ -50,8 +50,10 @@ export class BridgeError extends Error {
   }
 }
 
-/* A Map whose entries expire. Two uses, both tiny: group metadata for Baileys'
- * cachedGroupMetadata (minutes) and /send idempotency keys (a day). Expired
+/* A Map whose entries expire. Small uses, all tiny: group metadata for
+ * Baileys' cachedGroupMetadata (minutes), /send idempotency keys (a day), and
+ * whom the bridge has just written to, so their receipts get through (a
+ * quarter of an hour; session.mjs, LISTEN_MS). Expired
  * entries are dropped on read and swept on every write, so it can never hold
  * more than one TTL's worth of writes — a handful. */
 export class TtlCache {
@@ -70,6 +72,10 @@ export class TtlCache {
       return undefined;
     }
     return hit.value;
+  }
+
+  has(key) {
+    return this.get(key) !== undefined;
   }
 
   set(key, value) {

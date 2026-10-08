@@ -513,14 +513,16 @@ export function createScheduler({ db, bridge, log, clock = () => new Date(), pau
     return to;
   }
 
-  /* The answer to a 📅 message (capture.mjs): to the linked phone's own
-   * chat — Message yourself — never the group it came from. It goes while
-   * sending is paused too, like Send now: it answers something its owner
-   * just did. Once per key. */
-  async function sendToSelf({ key, title, text }) {
+  /* The answer to a 📅 message (capture.mjs): to where calendar messages go
+   * (Settings → Calendar) — the linked phone, unless changed, or there when
+   * that is "Nowhere". It goes while sending is paused too, like Send now:
+   * it answers something someone just did. Once per key. */
+  async function sendCalendarReply({ key, title, text }) {
     if (db.deliveries.get(key)?.status === "sent") return;
+    const settings = db.settings.get();
     await openStatus();
-    const to = destinationOf("self", "", new Map(), linkedPhone);
+    const to =
+      destinationOf(settings.calendarTo, settings.myPhone, db.chats.names(), linkedPhone) ?? destinationOf("self", "", new Map(), linkedPhone);
     if (!to?.id) throw new NotSendable("WhatsApp has not said which number is linked yet.");
     await deliverOne({ key, day: isoDate(today().date), kind: "capture", person: null, title, to }, text);
   }
@@ -540,7 +542,7 @@ export function createScheduler({ db, bridge, log, clock = () => new Date(), pau
     sendNow,
     sendPreview,
     sendTestAlert,
-    sendToSelf,
+    sendCalendarReply,
     sendingTurnedOn,
     agenda,
     today,

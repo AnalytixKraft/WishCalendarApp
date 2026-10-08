@@ -9,7 +9,7 @@ import { createScheduler } from "../src/scheduler.mjs";
 const SENT = "2026-10-08T04:30:00.000Z";
 const IST = { timeZone: "Asia/Kolkata" };
 const read = (text, quoted = null, sentAt = SENT) => {
-  const { notes, ...item } = readCapture({ text, quoted, sent_at: sentAt }, IST);
+  const { notes, sender, ...item } = readCapture({ text, quoted, sent_at: sentAt }, IST);
   return item;
 };
 const event = (title, day, time = "", extra = {}) => ({ kind: "event", title, day, endDay: null, time, endTime: "", why: null, ...extra });
@@ -59,6 +59,7 @@ test("a reply of 📅 takes the day, time and title from the message it replies 
   const full = readCapture({ text: "", quoted: "Choir moves to Sat 6pm\nBring the new music", sent_at: SENT }, { ...IST, where: "St. Mary's Choir" });
   assert.equal(full.notes, "Choir moves to Sat 6pm\nBring the new music\n\nFrom WhatsApp: St. Mary's Choir");
   assert.equal(readCapture({ text: "Lunch 1pm", quoted: null, sent_at: SENT }, IST).notes, "From WhatsApp: Message yourself");
+  assert.equal(readCapture({ text: "Lunch 1pm", quoted: null, sent_at: SENT, sender: "Anu" }, { ...IST, where: "Family" }).notes, "From WhatsApp: Family, Anu");
 });
 
 test("days are read from when it was sent, not from when it is read", () => {
@@ -68,7 +69,9 @@ test("days are read from when it was sent, not from when it is read", () => {
 
 test("the answer says what was added, and can never be taken for a 📅 message", () => {
   const trip = readCapture({ text: "Trip to Munnar 10-13 Oct", quoted: null, sent_at: SENT }, IST);
-  assert.equal(renderCaptureReply(trip), "✅ Added to your calendar: *Trip to Munnar*\nSat 10 Oct – Tue 13 Oct, all day\n\nNot right? Change it in Wish Calendar → Calendar.");
+  assert.equal(renderCaptureReply(trip), "✅ Added to the calendar: *Trip to Munnar*\nSat 10 Oct – Tue 13 Oct, all day\n\nNot right? Change it in Wish Calendar → Calendar.");
+  const dentist = { ...readCapture({ text: "Dentist Tue 10am", quoted: null, sent_at: SENT, sender: "Anu" }, IST), remind: 5 };
+  assert.equal(renderCaptureReply(dentist), "✅ Added to the calendar: *Dentist* (from Anu)\nTue 13 Oct, 10:00\nReminder 5 minutes before.\n\nNot right? Change it in Wish Calendar → Calendar.");
   const batteries = readCapture({ text: "Buy batteries", quoted: null, sent_at: SENT }, IST);
   assert.match(renderCaptureReply(batteries), /^✅ Added a task: \*Buy batteries\*\nThere was no day or time in it, so it is a task\./);
   for (const reply of [renderCaptureReply(trip), renderCaptureReply(batteries)]) assert.doesNotMatch(reply, /^\s*[📅📆]/u);
@@ -78,6 +81,8 @@ test("the answer says what was added, and can never be taken for a 📅 message"
 function fakeBridge(held) {
   return {
     held,
+    chats: [],
+    told: [],
     sent: [],
     acked: [],
     async status() {
@@ -88,7 +93,12 @@ function fakeBridge(held) {
       return { message_id: `M${this.sent.length}`, chat_id: chatId, deduplicated: false };
     },
     async commands() {
-      return this.held;
+      return { commands: this.held, chats: this.chats };
+    },
+    async setCommandChats(chats) {
+      this.told.push(chats);
+      this.chats = chats;
+      return { chats };
     },
     async ackCommands(ids) {
       this.acked.push(...ids);
@@ -98,58 +108,88 @@ function fakeBridge(held) {
   };
 }
 
-function setup(held) {
+const FAMILY = "120363000000000001@g.us";
+const SELF_JID = "447700900077@s.whatsapp.net";
+
+function setup(held, settings = {}) {
   const db = openDb(":memory:");
   const bridge = fakeBridge(held);
   const clock = () => new Date("2026-10-08T05:00:00Z");
   const scheduler = createScheduler({ db, bridge, log: silentLog, clock, pause: async () => {}, gap: () => 0 });
-  db.settings.save({ enabled: true, timezone: "Asia/Kolkata" });
-  db.chats.remember([{ id: "120363000000000001@g.us", subject: "St. Mary's Choir" }]);
+  db.settings.save({ enabled: true, timezone: "Asia/Kolkata", captureChats: ["self", FAMILY], ...settings });
+  db.chats.remember([{ id: FAMILY, subject: "Family" }]);
   return { db, bridge, capture: createCapture({ db, bridge, scheduler, log: silentLog, clock }) };
 }
 
-const command = (id, text, extra = {}) => ({ id, chat: "self", chat_id: "447700900077@s.whatsapp.net", sent_at: SENT, text, quoted: null, ...extra });
+const command = (id, text, extra = {}) => ({ id, chat: "self", chat_id: SELF_JID, sent_at: SENT, text, quoted: null, from_me: true, sender: null, ...extra });
+const inFamily = (id, text, extra = {}) => command(id, text, { chat: "group", chat_id: FAMILY, from_me: false, sender: "Anu", ...extra });
 
-test("each 📅 message goes on the calendar once, is answered in Message yourself, and let go", async () => {
+test("the bridge is told which chats 📅 messages count in — again only when that changes", async () => {
+  const { db, bridge, capture } = setup([]);
+  await capture.poll();
+  assert.deepEqual(bridge.told, [[FAMILY, "self"]]);
+  await capture.poll();
+  assert.equal(bridge.told.length, 1, "already so");
+  db.settings.save({ captureChats: ["self"] });
+  await capture.poll();
+  assert.deepEqual(bridge.told.at(-1), ["self"]);
+  db.settings.save({ capture: false });
+  await capture.poll();
+  assert.deepEqual(bridge.told.at(-1), [], "switched off: none");
+  bridge.chats = null; // a bridge from before chosen chats: it is not asked
+  await capture.poll();
+  assert.equal(bridge.told.length, 3);
+});
+
+test("each 📅 message goes on the calendar once — with the reminder new events get — is answered where calendar messages go, and let go", async () => {
   const { db, bridge, capture } = setup([
     command("A", "Dentist Tue 10am"),
-    command("B", "", { chat: "group", chat_id: "120363000000000001@g.us", quoted: "Choir moves to Sat 6pm" }),
+    inFamily("B", "", { quoted: "Choir moves to Sat 6pm" }),
     command("C", "Buy batteries"),
+    command("D", "Trip 10-13 Oct"),
   ]);
-  assert.equal(await capture.poll(), 3);
-  const dentist = db.events.between("2026-10-13", "2026-10-13")[0];
-  assert.deepEqual([dentist.title, dentist.time, dentist.notes], ["Dentist", "10:00", "From WhatsApp: Message yourself"]);
-  assert.match(db.events.between("2026-10-10", "2026-10-10")[0].notes, /From WhatsApp: St\. Mary's Choir$/);
+  assert.equal(await capture.poll(), 4);
+  const dentist = db.events.between("2026-10-13", "2026-10-13").find((e) => e.title === "Dentist");
+  assert.deepEqual([dentist.time, dentist.remind, dentist.notes], ["10:00", 5, "From WhatsApp: Message yourself"]);
+  const choir = db.events.between("2026-10-10", "2026-10-10").find((e) => e.title === "Choir moves");
+  assert.match(choir.notes, /From WhatsApp: Family, Anu$/);
+  assert.equal(db.events.between("2026-10-10", "2026-10-13").find((e) => e.title === "Trip").remind, null, "all day: no reminder minutes before");
   assert.equal(db.tasks.open()[0].title, "Buy batteries");
   assert.deepEqual(
     bridge.sent.map((s) => [s.key, s.chatId]),
-    [
-      ["capture:A", "447700900077@s.whatsapp.net"],
-      ["capture:B", "447700900077@s.whatsapp.net"],
-      ["capture:C", "447700900077@s.whatsapp.net"],
-    ],
-    "every answer to the linked phone itself — never the group",
+    ["A", "B", "C", "D"].map((id) => [`capture:${id}`, SELF_JID]),
+    "to where calendar messages go: the linked phone, unless changed",
   );
+  assert.match(bridge.sent[1].text, /^✅ Added to the calendar: \*Choir moves\* \(from Anu\)\nSat 10 Oct, 18:00\nReminder 5 minutes before\./);
   assert.equal(db.deliveries.get("capture:A").title, "Dentist");
-  assert.deepEqual(bridge.acked, ["A", "B", "C"]);
+  assert.deepEqual(bridge.acked, ["A", "B", "C", "D"]);
 
   // Held again (the ack did not land): taken once all the same.
   bridge.held = [command("A", "Dentist Tue 10am")];
   assert.equal(await capture.poll(), 0);
-  assert.equal(db.events.between("2026-10-13", "2026-10-13").length, 1);
-  assert.equal(bridge.sent.length, 3);
+  assert.equal(db.events.between("2026-10-13", "2026-10-13").filter((e) => e.title === "Dentist").length, 1);
+  assert.equal(bridge.sent.length, 4);
+});
+
+test("answers go to the group calendar messages go to; a chat no longer chosen adds nothing", async () => {
+  const { db, bridge, capture } = setup([inFamily("A", "Lunch Sat 1pm"), inFamily("B", "Dinner Sat 8pm", { chat_id: "120363000000000002@g.us" })], {
+    calendarTo: FAMILY,
+    defaultRemind: null,
+  });
+  assert.equal(await capture.poll(), 1);
+  assert.deepEqual(bridge.sent.map((s) => [s.key, s.chatId]), [["capture:A", FAMILY]]);
+  assert.equal(db.events.between("2026-10-10", "2026-10-10")[0].remind, null, "no reminder when Settings gives none");
+  assert.deepEqual(bridge.acked, ["A", "B"], "both let go");
 });
 
 test("switched off, 📅 messages are let go and nothing is added; paused, they are still answered", async () => {
-  const off = setup([command("A", "Dentist Tue 10am")]);
-  off.db.settings.save({ capture: false });
+  const off = setup([command("A", "Dentist Tue 10am")], { capture: false });
   assert.equal(await off.capture.poll(), 0);
   assert.deepEqual([off.db.events.count(), off.bridge.sent.length, off.bridge.acked], [0, 0, ["A"]]);
 
-  const paused = setup([command("A", "Dentist Tue 10am")]);
-  paused.db.settings.save({ enabled: false });
+  const paused = setup([command("A", "Dentist Tue 10am")], { enabled: false });
   assert.equal(await paused.capture.poll(), 1);
-  assert.equal(paused.bridge.sent.length, 1, "it answers something its owner just did");
+  assert.equal(paused.bridge.sent.length, 1, "it answers something someone just did");
 });
 
 test("a bridge without 📅 messages (or not there at all) is no error", async () => {

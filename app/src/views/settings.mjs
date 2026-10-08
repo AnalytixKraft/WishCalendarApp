@@ -2,6 +2,7 @@
  * password. */
 
 import { MAX_PASSWORD, MIN_PASSWORD } from "../auth.mjs";
+import { REMINDERS } from "../calendar.mjs";
 import { DEFAULT_ANNIVERSARY_TEMPLATE, DEFAULT_TEMPLATE, MAX_TEMPLATE } from "../messages.mjs";
 import { html, raw, selectOptions } from "./html.mjs";
 import { iconOf, layout, phoneOf } from "./layout.mjs";
@@ -54,6 +55,25 @@ ${status?.last_error ? html`<p class="notice">${status.last_error}</p>` : ""}
   ${body}
   <p class="wa-changed notice" hidden>WhatsApp’s state has changed — <a href="/settings#whatsapp">reload</a> to see it (your unsaved settings below would be lost).</p>
 </section>`;
+}
+
+/* Where 📅 messages count: Message yourself, and the groups ticked. A group
+ * chosen before that the number has since left stays listed, so a save does
+ * not drop it unseen. */
+function capturePicks(chosen, groups) {
+  const on = new Set(chosen);
+  const known = new Set(groups.map((g) => g.id));
+  const pick = (value, label, note = "") =>
+    html`<label class="check"><input type="checkbox" name="captureChat" value="${value}"${on.has(value) ? raw(" checked") : ""}> <span>${label}${note ? html` <span class="optional">${note}</span>` : ""}</span></label>`;
+  return html`<fieldset class="field chat-picks">
+  <legend class="field__label">Where 📅 messages count</legend>
+  <div class="chat-picks__list">
+    ${pick("self", "Message yourself", "the linked number’s own chat — only its own messages")}
+    ${groups.map((g) => pick(g.id, g.subject))}
+    ${[...on].filter((c) => c !== "self" && !known.has(c)).map((c) => pick(c, "A group the number has left, or not listed now"))}
+  </div>
+  <span class="hint">In a group you tick, <strong>anyone in it</strong> can add to the calendar with a 📅 message — at most 30 an hour. Groups you don’t tick are not read at all.${groups.length ? "" : " Link WhatsApp to list your groups here."}</span>
+</fieldset>`;
 }
 
 /* --------------------------------------------------------------- settings */
@@ -132,8 +152,15 @@ ${whatsappSection(wa)}
       ${error(errors.calendarTo)}
     </label>
     <p class="hint">At the reminder time, “Your day” lists the day’s events, the tasks due, and tomorrow’s events — on days that have any. An event with a reminder gets a message of its own at that time. They go apart from the wishes’ reminder; choose a group only if everyone in it may read them.</p>
+    <label class="field field--short">
+      <span class="field__label">Remind me before each new event</span>
+      <select name="defaultRemind"${invalid(errors.defaultRemind)}>${selectOptions([["", "No reminder"], ...REMINDERS], values.defaultRemind ?? "")}</select>
+      ${error(errors.defaultRemind)}
+      <span class="hint">Events added from WhatsApp get it, and an event you add here starts with it. Change it on any event.</span>
+    </label>
     <input type="hidden" name="captureShown" value="1">
-    <label class="check check--big"><input type="checkbox" name="capture" value="1"${values.capture ? raw(" checked") : ""}> <span><strong>Add to my calendar from WhatsApp</strong><br><span class="hint">Start a message with 📅 — in any group, or in Message yourself — like <code>📅 Dentist Tue 10am</code>, <code>📅 Trip 10-13 Oct</code> or <code>📅 task Pay rent by Fri</code>. Or reply 📅 to someone’s message, to add what it says. Only messages from the linked number count, never anyone else’s. The answer comes in Message yourself; in a group, everyone there sees your 📅 message.</span></span></label>
+    <label class="check check--big"><input type="checkbox" name="capture" value="1"${values.capture ? raw(" checked") : ""}> <span><strong>Add to the calendar from WhatsApp</strong><br><span class="hint">A message that starts with 📅, in a chat ticked below, goes on the calendar: <code>📅 Dentist Tue 10am</code>, <code>📅 Trip 10-13 Oct</code>, <code>📅 task Pay rent by Fri</code> — or a reply of 📅 to a message, to add what it says. The answer goes where calendar messages go.</span></span></label>
+    ${capturePicks(values.captureChats, groups)}
   </fieldset>
 
   <fieldset class="settings-group" id="alerts">

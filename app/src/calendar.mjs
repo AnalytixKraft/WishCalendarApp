@@ -19,6 +19,7 @@ export const REPEATS = [
  * or more ahead: on the day itself it is in "Your day" already. */
 export const REMINDERS = [
   [0, "At the time"],
+  [5, "5 minutes before"],
   [10, "10 minutes before"],
   [30, "30 minutes before"],
   [60, "1 hour before"],

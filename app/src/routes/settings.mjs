@@ -10,7 +10,8 @@ import { formatPhone, normalizePhone } from "../phone.mjs";
 import { NotSendable } from "../scheduler.mjs";
 import { plural } from "../views/html.mjs";
 import { settingsPage } from "../views/settings.mjs";
-import { readMessage, readSendTo } from "./forms.mjs";
+import { REMINDERS } from "../calendar.mjs";
+import { GROUP_JID, readMessage, readSendTo } from "./forms.mjs";
 
 function timeZones(current) {
   const zones = Intl.supportedValuesOf("timeZone");
@@ -129,6 +130,8 @@ export function settingsRoutes({ db, bridge, scheduler, log, assets, auth, throt
       alertTo: form.has("alertTo") ? form.get("alertTo") : before.alertTo,
       calendarTo: form.has("calendarTo") ? form.get("calendarTo") : before.calendarTo,
       capture: form.has("captureShown") ? form.has("capture") : before.capture,
+      captureChats: form.has("captureShown") ? [...new Set(form.all("captureChat"))].filter((c) => c === "self" || GROUP_JID.test(c)) : before.captureChats,
+      defaultRemind: form.has("defaultRemind") ? (form.get("defaultRemind") === "" ? null : Number(form.get("defaultRemind"))) : before.defaultRemind,
       countryCode: form.get("countryCode").replace(/^\+/, ""),
     };
     const errors = {};
@@ -147,6 +150,7 @@ export function settingsRoutes({ db, bridge, scheduler, log, assets, auth, throt
     if (alertTo.error && !myPhone.error) errors.alertTo = alertTo.error;
     const calendarTo = readSendTo(values.calendarTo, myPhone.phone, { direct: "your", self: true });
     if (calendarTo.error && !myPhone.error) errors.calendarTo = calendarTo.error;
+    if (values.defaultRemind !== null && !REMINDERS.some(([m]) => m === values.defaultRemind)) errors.defaultRemind = "Choose a reminder from the list.";
     if (Object.keys(errors).length) return renderSettings(ctx, { status: 422, values, errors });
 
     db.settings.save({

@@ -463,9 +463,10 @@ test("an event is checked before it is saved, and can be changed and deleted", a
   await refused({ day: "2026-02-30" }, /Pick the day/);
   await refused({ endDay: "2026-11-01" }, /before the day it starts/);
   await refused({ endTime: "09:00" }, /not after it starts/);
-  await refused({ time: "", endTime: "" }, /An all-day event is in “Your day” on the morning itself/);
   await refused({ repeat: "weekly", repeatUntil: "2026-10-01" }, /before the day it starts/);
   await refused({ remind: "45" }, /Choose a reminder from the list/);
+  assert.equal((await post("/events", { ...base, title: "All day", time: "", endTime: "", remind: "5" }, { cookie })).status, 303);
+  assert.equal(db.events.between("2026-11-03", "2026-11-03").find((e) => e.title === "All day").remind, null, "minutes before an all-day event: not kept");
 
   const created = await post("/events", base, { cookie });
   assert.equal(created.status, 303);
@@ -526,7 +527,7 @@ test("Settings: calendar messages go to the linked phone unless changed, apart f
 test("Settings: 📅 messages from WhatsApp go on the calendar unless switched off", async () => {
   const cookie = await signIn();
   const page = await (await get("/settings", cookie)).text();
-  assert.match(page, /<input type="checkbox" name="capture" value="1" checked> <span><strong>Add to my calendar from WhatsApp<\/strong>/);
+  assert.match(page, /<input type="checkbox" name="capture" value="1" checked> <span><strong>Add to the calendar from WhatsApp<\/strong>/);
   const base = { wishTime: "08:00", reminderTime: "07:00", timezone: "Asia/Kolkata", daysAhead: "1", countryCode: "91", template: "", reminderTo: "", myPhone: "", alertTo: "self", calendarTo: "self" };
   assert.equal((await post("/settings", base, { cookie })).status, 303);
   assert.equal(db.settings.get().capture, true, "a page from before the switch keeps it");
@@ -534,4 +535,23 @@ test("Settings: 📅 messages from WhatsApp go on the calendar unless switched o
   assert.equal(db.settings.get().capture, false, "unticked");
   assert.equal((await post("/settings", { ...base, captureShown: "1", capture: "1" }, { cookie })).status, 303);
   assert.equal(db.settings.get().capture, true);
+  db.settings.save({ captureChats: ["self"] }); // those posts ticked no chat
+});
+
+test("Settings: where 📅 messages count, and the reminder new events start with", async () => {
+  const cookie = await signIn();
+  const page = await (await get("/settings", cookie)).text();
+  assert.match(page, /<input type="checkbox" name="captureChat" value="self" checked> <span>Message yourself/, "Message yourself, unless changed");
+  assert.match(page, /<select name="defaultRemind"[^>]*>.*<option value="5" selected>5 minutes before<\/option>/s);
+  assert.match(await (await get("/events/new", cookie)).text(), /<option value="5" selected>5 minutes before<\/option>/, "a new event starts with it");
+  const base = { wishTime: "08:00", reminderTime: "07:00", timezone: "Asia/Kolkata", daysAhead: "1", countryCode: "91", template: "", reminderTo: "", myPhone: "", alertTo: "self", calendarTo: "self", captureShown: "1", capture: "1" };
+  const group = "120363000000000042@g.us";
+  const saved = await post("/settings", [...Object.entries(base), ["captureChat", group], ["captureChat", "self"], ["captureChat", "not-a-chat"], ["defaultRemind", "10"]], { cookie });
+  assert.equal(saved.status, 303);
+  assert.deepEqual([db.settings.get().captureChats.sort(), db.settings.get().defaultRemind], [[group, "self"], 10]);
+  assert.match(await (await get("/settings", cookie)).text(), new RegExp(`value="${group}" checked> <span>A group the number has left`), "kept in view, though not listed");
+  assert.equal((await post("/settings", [...Object.entries(base), ["defaultRemind", "7"]], { cookie })).status, 422);
+  assert.equal((await post("/settings", [...Object.entries(base), ["defaultRemind", ""]], { cookie })).status, 303);
+  assert.deepEqual([db.settings.get().captureChats, db.settings.get().defaultRemind], [[], null], "nothing ticked: nowhere; no reminder");
+  db.settings.save({ captureChats: ["self"], defaultRemind: 5 });
 });

@@ -1,7 +1,9 @@
-/* 📅 messages: what you send on WhatsApp to put on the calendar. The bridge
- * holds each one you send — in a group, or in Message yourself — that starts
- * with 📅 or 📆 (whatsapp/src/commands.mjs); this takes them, turns each into
- * an event or a task by simple rules, and answers in Message yourself.
+/* 📅 messages: what is sent on WhatsApp to put on the calendar. The bridge
+ * holds each message that starts with 📅 or 📆 in a chat chosen in Settings
+ * → Calendar — a group, where anyone in it may send one, or Message yourself
+ * (whatsapp/src/commands.mjs). This tells the bridge which chats those are,
+ * takes the messages, turns each into an event or a task by simple rules,
+ * and answers where calendar messages go.
  *
  *   📅 Dentist Tue 10am              an event, the coming Tuesday at 10:00
  *   📅 Trip to Munnar 10-13 Oct      an event, 10 to 13 October, all day
@@ -14,13 +16,15 @@
  *
  * Days and times are read from the day the message was sent, in the app's
  * time zone — not the moment it is read, which can be hours later when this
- * computer was asleep. The answer goes through the scheduler (sendToSelf).
+ * computer was asleep. A timed event gets the reminder Settings gives new
+ * events (5 minutes before, unless changed). The answer goes through the
+ * scheduler (sendCalendarReply).
  *
  * Each message is taken once (db.captures, by WhatsApp's id), then the
  * bridge is told to let it go. Switched off in Settings, they are let go
  * unread. */
 
-import { MAX_TITLE, shiftDay, timeRange } from "./calendar.mjs";
+import { DAY_MINUTES, MAX_TITLE, reminderLabel, shiftDay, timeRange } from "./calendar.mjs";
 import { daysInMonth, formatShortDate, fromIsoDate, isoDate, weekdayOf, zonedNow } from "./dates.mjs";
 
 const MONTH = "(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\\.?";
@@ -163,7 +167,7 @@ const TASK = /^(?:task|todo|to-do|to do)\b[\s:–-]*/i;
  *   {kind: 'event', title, day, endDay, time, endTime, notes, why}
  *   {kind: 'task', title, due, notes, why}
  * `where`: the group's name, or null for Message yourself. */
-export function readCapture({ text, quoted, sent_at: sentAt }, { timeZone, where = null }) {
+export function readCapture({ text, quoted, sent_at: sentAt, sender = null }, { timeZone, where = null }) {
   const now = zonedNow(new Date(sentAt), timeZone);
   const today = { year: now.year, month: now.month, day: now.day };
   const asTask = TASK.test(text);
@@ -174,7 +178,7 @@ export function readCapture({ text, quoted, sent_at: sentAt }, { timeZone, where
   const day = own.day ? own : theirs?.day ? theirs : null;
   const time = own.time ? own : theirs?.time ? theirs : null;
   const title = tidy(own.rest) || (theirs ? tidy(firstLine(theirs.rest)) || tidy(firstLine(quoted)) : "") || "Untitled";
-  const notes = [quoted, `From WhatsApp: ${where ?? "Message yourself"}`].filter(Boolean).join("\n\n");
+  const notes = [quoted, `From WhatsApp: ${where ?? "Message yourself"}${sender ? `, ${sender}` : ""}`].filter(Boolean).join("\n\n");
 
   if (asTask || (day && !time && (own.by || (!own.day && theirs?.by))) || (!day && !time)) {
     return {
@@ -182,30 +186,41 @@ export function readCapture({ text, quoted, sent_at: sentAt }, { timeZone, where
       title,
       due: day?.day ?? null,
       notes,
+      sender,
       why: asTask || day ? null : "There was no day or time in it, so it is a task.",
     };
   }
   let on = day?.day ?? isoDate(today);
   // A time and no day: that day, or the next when the time had passed.
   if (!day && time.time <= `${pad(now.hour)}:${pad(now.minute)}`) on = shiftDay(on, 1);
-  return { kind: "event", title, day: on, endDay: day?.endDay ?? null, time: time?.time ?? "", endTime: time?.endTime ?? "", notes, why: null };
+  return { kind: "event", title, day: on, endDay: day?.endDay ?? null, time: time?.time ?? "", endTime: time?.endTime ?? "", notes, sender, why: null };
 }
 
-/* The answer, in Message yourself. Never starts with 📅 or 📆, so it can
- * never be taken for one. */
+/* The answer, where calendar messages go: what was added, and when — and
+ * from whom, when someone in a group sent it. Never starts with 📅 or 📆,
+ * so it can never be taken for one. */
 export function renderCaptureReply(item) {
   const short = (day) => formatShortDate(fromIsoDate(day));
+  const by = item.sender ? ` (from ${item.sender})` : "";
   if (item.kind === "event") {
     const days = item.endDay ? `${short(item.day)} – ${short(item.endDay)}` : short(item.day);
     const when = `${days}, ${timeRange(item) || "all day"}`;
-    return [`✅ Added to your calendar: *${item.title}*`, when, "", "Not right? Change it in Wish Calendar → Calendar."].join("\n");
+    const reminder = item.remind === null || item.remind === undefined ? [] : [`Reminder ${reminderLabel(item.remind).toLowerCase()}.`];
+    return [`✅ Added to the calendar: *${item.title}*${by}`, when, ...reminder, "", "Not right? Change it in Wish Calendar → Calendar."].join("\n");
   }
   return [
-    `✅ Added a task: *${item.title}*${item.due ? ` — due ${short(item.due)}` : ""}`,
+    `✅ Added a task: *${item.title}*${item.due ? ` — due ${short(item.due)}` : ""}${by}`,
     ...(item.why ? [item.why] : []),
     "",
     "Not right? Change it in Wish Calendar → Calendar.",
   ].join("\n");
+}
+
+/* The reminder a new event gets, as Settings says — when it can have it: an
+ * all-day event only one a day or more ahead. */
+export function reminderFor(event, minutes) {
+  if (minutes === null || minutes === undefined) return null;
+  return event.time || minutes >= DAY_MINUTES ? minutes : null;
 }
 
 export const POLL_MS = 15_000;
@@ -220,21 +235,36 @@ export function createCapture({ db, bridge, scheduler, log, clock = () => new Da
    * it, or null for Message yourself. */
   const whereOf = (command) => (command.chat === "group" ? db.chats.names().get(command.chat_id) || "a group" : null);
 
+  /* The chats 📅 messages count in now: none while switched off. */
+  const chosen = (settings) => (settings.capture ? [...new Set(settings.captureChats)].sort() : []);
+  const keyOf = (command) => (command.chat === "self" ? "self" : command.chat_id);
+
   /* Puts one 📅 message on the calendar. → what it became, or null. */
   function take(command, settings) {
-    if (!settings.capture) {
+    if (!chosen(settings).includes(keyOf(command))) {
+      // Held by the bridge before the chat was let go of: not added.
       db.captures.record(command);
       return null;
     }
-    const item = readCapture(command, { timeZone: settings.timezone, where: whereOf(command) });
+    const read = readCapture(command, { timeZone: settings.timezone, where: whereOf(command) });
+    const item = read.kind === "event" ? { ...read, remind: reminderFor(read, settings.defaultRemind) } : read;
     return db.transaction(() => {
       const id =
         item.kind === "event"
-          ? db.events.create({ title: item.title, day: item.day, endDay: item.endDay, time: item.time, endTime: item.endTime, notes: item.notes })
+          ? db.events.create({ title: item.title, day: item.day, endDay: item.endDay, time: item.time, endTime: item.endTime, remind: item.remind, notes: item.notes })
           : db.tasks.create({ title: item.title, due: item.due, notes: item.notes });
       db.captures.record(command, item.kind, id);
       return item;
     });
+  }
+
+  /* The bridge acts on the chats it was last told of — none after it
+   * starts. Told again whenever that is not what Settings says. */
+  async function tellChats(has, settings) {
+    const wanted = chosen(settings);
+    if (!Array.isArray(has) || [...has].sort().join(" ") === wanted.join(" ")) return;
+    await bridge.setCommandChats(wanted);
+    log.info({ self: wanted.includes("self"), groups: wanted.filter((c) => c !== "self").length }, "📅 messages: told the bridge where they count");
   }
 
   /* Takes what the bridge holds, answers each, and tells it to let them go.
@@ -244,8 +274,11 @@ export function createCapture({ db, bridge, scheduler, log, clock = () => new Da
     busy = true;
     try {
       let commands;
+      const settings = db.settings.get();
       try {
-        commands = await bridge.commands();
+        const held = await bridge.commands();
+        commands = held.commands ?? [];
+        await tellChats(held.chats, settings);
       } catch (err) {
         // Not linked, not running, or a bridge from before 📅 messages: the
         // next poll asks again. Said once, not every 15 s.
@@ -255,7 +288,6 @@ export function createCapture({ db, bridge, scheduler, log, clock = () => new Da
       }
       lastProblem = null;
       if (!commands.length) return 0;
-      const settings = db.settings.get();
       let added = 0;
       const taken = [];
       for (const command of [...commands].sort((a, b) => a.sent_at.localeCompare(b.sent_at))) {
@@ -265,7 +297,7 @@ export function createCapture({ db, bridge, scheduler, log, clock = () => new Da
             added++;
             log.info({ message_id: command.id, kind: item.kind }, "📅 message put on the calendar"); // never its text
             try {
-              await scheduler.sendToSelf({ key: `capture:${command.id}`, title: item.title, text: renderCaptureReply(item) });
+              await scheduler.sendCalendarReply({ key: `capture:${command.id}`, title: item.title, text: renderCaptureReply(item) });
             } catch (err) {
               log.warn({ message_id: command.id, err: err.message }, "📅 message added, but its answer was not sent");
             }
