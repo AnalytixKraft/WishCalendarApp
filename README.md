@@ -8,7 +8,7 @@ Keep the list in the app: 🎂 birthdays, and 💍 anniversaries (a couple's wed
 - sends **each wish** at its time, to where its row says, and
 - **tells you when a wish was not sent**, which one and why, so none is missed quietly.
 
-It is your notebook too: [notes and a journal page for each day](#notes-and-the-journal), with #tags and search, kept on the same computer and never sent anywhere.
+It is your calendar and notebook too: [events and tasks](#the-calendar), with reminders on WhatsApp to you, and [notes and a journal page for each day](#notes-and-the-journal), with #tags and search.
 
 It runs on a computer that stays on — a Mac, directly, with nothing but Node; or any computer with Docker — and you use it in the browser at `http://localhost:3210`.
 
@@ -167,6 +167,32 @@ bash scripts/reset-password.sh
 ```
 
 That removes the password set in Settings, so `ADMIN_PASSWORD` from `.env` works again.
+
+## The calendar
+
+**Calendar** holds your events and tasks, beside the birthdays and anniversaries.
+
+- **An event** has a day and a time — or none, for all day — and can last several days (*Until*). It can repeat every day, week, month or year, until a day or for good; monthly on the 31st falls on the last day of a shorter month.
+- **A reminder**, if you give an event one, comes on WhatsApp at its time: when it starts, or from 10 minutes to a week before. An all-day event's comes at the reminder time, the day or days before.
+- **A task** has a title and, if you like, a day it is due. Tick it off on the calendar or on Today; overdue ones show in red.
+- **Your day**: each morning at the reminder time, a message lists the day's events, the tasks due and overdue, and tomorrow's events — on days that have any.
+
+```
+🗓️ Your day · Thu 8 Oct
+
+• All day Trip to Munnar (day 2 of 4)
+• 10:00–10:45 Dentist
+• 18:30 Choir practice
+
+To do
+• Call the plumber — overdue since Tue 6 Oct
+• Pay the electricity bill
+
+Tomorrow
+• 13:00 Team lunch
+```
+
+Calendar messages go to the linked phone (*Message yourself*) unless you change it in **Settings → Calendar**; *Nowhere* turns them off. They are yours, so they never go with the wishes' morning reminder. Like every message, they wait while sending is paused, and an alert tells you when one is refused.
 
 ## Notes and the journal
 

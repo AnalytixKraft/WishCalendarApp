@@ -1,6 +1,6 @@
 /* Reading the fields more than one page has. */
 
-import { parseTime } from "../dates.mjs";
+import { addDays, fromIsoDate, isoDate, parseTime } from "../dates.mjs";
 import { MAX_TEMPLATE } from "../messages.mjs";
 
 export const GROUP_JID = /^\d+(-\d+)?@g\.us$/;
@@ -20,4 +20,11 @@ export const readMessage = (form, name) => form.raw(name).replace(/\r\n/g, "\n")
 /* A person's own send time: '' (the wish time in Settings) or HH:MM. */
 export function readTime(value) {
   return value === "" || parseTime(value) !== null ? { time: value } : { error: "Enter a time like 09:30, or leave it empty." };
+}
+
+/* 'YYYY-MM-DD' that is a real day → {year, month, day}; else null. */
+export function readDay(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const date = fromIsoDate(value);
+  return date.year >= 1900 && date.year <= 2100 && isoDate(addDays(date, 0)) === value ? date : null;
 }

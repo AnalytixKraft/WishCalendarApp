@@ -169,3 +169,48 @@ test("migration 6 adds the notebook: notes, journal pages, tags and search", () 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("migration 7 keeps every message sent, alerts' text included, and adds the calendar", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bdr-"));
+  try {
+    const file = join(dir, "birthdays.db");
+    firstVersionDb(file);
+    let db = openDb(file);
+    db.alerts.create({ key: "alert:missed:2026-09-29", day: "2026-09-30", text: "⚠️ *Wish Calendar: a wish was not sent*" }, "2026-09-30T01:30:00.000Z");
+    db.close();
+    // Back to version 6, with that alert in a deliveries table without `title`.
+    const raw = new DatabaseSync(file);
+    raw.exec(`DROP TABLE events; DROP TABLE tasks; ALTER TABLE deliveries DROP COLUMN title; PRAGMA user_version = 6;`);
+    raw.close();
+
+    db = openDb(file);
+    const alert = db.deliveries.get("alert:missed:2026-09-29");
+    assert.deepEqual([alert.kind, alert.status, alert.text, alert.title], ["alert", "pending", "⚠️ *Wish Calendar: a wish was not sent*", null]);
+    db.deliveries.begin({ key: "event:1:2026-09-30:60", day: "2026-09-30", kind: "event", title: "Dentist", to: { id: "447700900077@s.whatsapp.net", label: "the linked phone" } }, "2026-09-30T03:30:00.000Z");
+    assert.equal(db.deliveries.get("event:1:2026-09-30:60").title, "Dentist");
+
+    const id = db.events.create({ title: "Choir", day: "2026-09-23", time: "18:30", repeat: "weekly", repeatUntil: "2026-12-31", remind: 30 });
+    assert.deepEqual(db.events.between("2026-10-01", "2026-10-31").map((e) => e.id), [id], "a repeating event started before");
+    db.events.update(id, { title: "Choir", day: "2026-09-23", time: "18:30", repeat: "", repeatUntil: "2026-12-31" });
+    assert.equal(db.events.get(id).repeatUntil, null, "no repeat, no until");
+    assert.deepEqual(db.events.between("2026-10-01", "2026-10-31"), [], "nor after it");
+    assert.throws(() => db.events.create({ title: "Backwards", day: "2026-10-02", endDay: "2026-10-01" }), /CHECK/);
+
+    const later = db.tasks.create({ title: "Later", due: "2026-10-05" });
+    const sooner = db.tasks.create({ title: "Sooner", due: "2026-09-29" });
+    const anyTime = db.tasks.create({ title: "Any time" });
+    assert.deepEqual(db.tasks.open().map((t) => t.id), [sooner, later, anyTime]);
+    assert.deepEqual(db.tasks.dueBy("2026-09-30").map((t) => t.id), [sooner]);
+    db.tasks.setDone(sooner, true);
+    const doneAt = db.tasks.get(sooner).doneAt;
+    db.tasks.setDone(sooner, true);
+    assert.equal(db.tasks.get(sooner).doneAt, doneAt, "ticked twice, done once");
+    assert.deepEqual(db.tasks.done().map((t) => t.id), [sooner]);
+    db.tasks.setDone(sooner, false);
+    assert.equal(db.tasks.get(sooner).done, false);
+    assert.equal(db.settings.get().calendarTo, "self", "calendar messages go to the linked phone unless changed");
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

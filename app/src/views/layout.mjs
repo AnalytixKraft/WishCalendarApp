@@ -27,12 +27,13 @@ export function clockTime(iso, timeZone, withDate = false) {
 
 const NAV = [
   ["today", "/", "Today"],
+  ["calendar", "/calendar", "Calendar"],
   ["notes", "/notes", "Notes"],
   ["people", "/people", "People"],
   ["settings", "/settings", "Settings"],
 ];
 
-export function layout({ title, active = null, body, flash = null, signedIn = true, assets }) {
+export function layout({ title, active = null, body, flash = null, signedIn = true, wide = false, assets }) {
   return html`<!doctype html>
 <html lang="en">
 <head>
@@ -54,7 +55,7 @@ ${signedIn
   <form method="post" action="/logout" class="masthead__signout"><button type="submit" class="linkish">Sign out</button></form>
 </header>`
   : ""}
-<main class="page${signedIn ? "" : " page--bare"}">
+<main class="page${signedIn ? "" : " page--bare"}${wide ? " page--wide" : ""}">
 ${flash ? html`<div class="flash flash--${flash.type}" role="${flash.type === "error" ? "alert" : "status"}">${flash.text}</div>` : ""}
 ${body}
 </main>

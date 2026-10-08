@@ -1,8 +1,10 @@
 /* What the app sends: a wish for a birthday or an anniversary, from a
- * template, and the daily reminder to the organiser. WhatsApp formatting
- * applies: *bold*, _italic_, ~strike~. */
+ * template, the daily reminder to the organiser, and the calendar's messages
+ * to you — "Your day" each morning, and an event's reminder. WhatsApp
+ * formatting applies: *bold*, _italic_, ~strike~. */
 
-import { ageOn, formatShortDate, ordinal } from "./dates.mjs";
+import { timeRange } from "./calendar.mjs";
+import { addDays, ageOn, formatShortDate, fromIsoDate, isoDate, ordinal } from "./dates.mjs";
 
 /* The occasions a row on the People page can be. */
 export const KINDS = ["birthday", "anniversary"];
@@ -109,6 +111,46 @@ function quoted(text) {
     .join("\n");
 }
 
+/* --------------------------------------------------------------- calendar */
+
+/* "today", "tomorrow", or "Thu 15 Oct", seen from `date`. */
+function dayWord(day, date) {
+  if (day === isoDate(date)) return "today";
+  if (day === isoDate(addDays(date, 1))) return "tomorrow";
+  return formatShortDate(fromIsoDate(day));
+}
+
+/* One event in a list: its time (or all day), its title, and which of its
+ * days this is when it lasts longer. */
+function eventLine({ event, dayOf, days }) {
+  const when = timeRange(event) ? `*${timeRange(event)}*` : "All day";
+  return `• ${when} ${event.title}${days > 1 ? ` (day ${dayOf} of ${days})` : ""}`;
+}
+
+/* The morning's "Your day": what the calendar holds today, the tasks due
+ * (and overdue), and tomorrow's events. Each list as eventsOn() makes it;
+ * tasks as db.tasks.dueBy(). */
+export function renderAgenda({ date, today, tasks, tomorrow }) {
+  const day = isoDate(date);
+  const lines = [`🗓️ *Your day* · ${formatShortDate(date)}`];
+  lines.push("", ...(today.length ? today.map(eventLine) : ["Nothing on the calendar today."]));
+  if (tasks.length) {
+    lines.push("", "*To do*");
+    for (const task of tasks) lines.push(`• ${task.title}${task.due < day ? ` — overdue since ${formatShortDate(fromIsoDate(task.due))}` : ""}`);
+  }
+  if (tomorrow.length) lines.push("", "*Tomorrow*", ...tomorrow.map(eventLine));
+  return lines.join("\n");
+}
+
+/* An event's reminder, sent `remind` minutes before it starts — said by its
+ * day and time, so it reads right even if it goes out late. */
+export function renderEventReminder({ event, start, date }) {
+  const when = dayWord(start, date);
+  const lines = [`⏰ *${event.title}*`, `${when[0].toUpperCase()}${when.slice(1)}${timeRange(event) ? `, ${timeRange(event)}` : ", all day"}`];
+  if (event.notes.trim()) lines.push(quoted(event.notes));
+  return lines.join("\n");
+}
+
 /* ----------------------------------------------------------------- alerts */
 
 /* When a wish is not sent, the app says so on WhatsApp: which, to where,
@@ -123,13 +165,19 @@ export function alertSummary(text) {
 
 /* A message an alert is about: whose, to where, at what time. */
 function alertLine(job) {
-  const what = job.kind === "reminder" ? "🗓️ *Your morning reminder*" : `${KIND_ICON[job.person.kind] ?? "🎂"} *${job.person.name}*`;
+  const what = {
+    reminder: "🗓️ *Your morning reminder*",
+    agenda: "🗓️ *Your day*",
+    event: `⏰ *${job.title}*`,
+  }[job.kind] ?? `${KIND_ICON[job.person.kind] ?? "🎂"} *${job.person.name}*`;
   return `${what} → ${job.to.label} · ${job.time}`;
 }
 
+const ONE = { wish: "a wish", reminder: "your reminder", agenda: "“Your day”", event: "a calendar reminder" };
+
 function notSent(items) {
   const wishes = items.filter((item) => item.job.kind === "wish").length;
-  if (items.length === 1) return wishes ? "a wish was not sent" : "your reminder was not sent";
+  if (items.length === 1) return `${ONE[items[0].job.kind] ?? "a message"} was not sent`;
   return `${items.length} ${wishes === items.length ? "wishes" : "messages"} were not sent`;
 }
 
