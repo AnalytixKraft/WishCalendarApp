@@ -5,6 +5,7 @@ import { STATE_LABELS } from "../bridge.mjs";
 import { alertSummary } from "../messages.mjs";
 import { html, plural } from "./html.mjs";
 import { clockTime, iconOf, layout, leaf, phoneOf } from "./layout.mjs";
+import { yourDayCard } from "./calendar.mjs";
 import { journalCard } from "./notes.mjs";
 
 function waSummary(wa) {
@@ -30,9 +31,17 @@ function deliveryLine(job, timeZone) {
 }
 
 function jobTitle(job) {
-  return job.kind === "wish"
-    ? html`<span aria-hidden="true">${iconOf(job.person.kind)}</span> Wish for <strong>${job.person.name}</strong>${job.to ? html` <span class="arrow" aria-hidden="true">→</span><span class="visually-hidden">, to</span> ${job.to.label}` : ""}`
-    : html`Your reminder <span class="arrow" aria-hidden="true">→</span><span class="visually-hidden">, to</span> ${job.to.label}`;
+  const to = (label) => html` <span class="arrow" aria-hidden="true">→</span><span class="visually-hidden">, to</span> ${label}`;
+  switch (job.kind) {
+    case "wish":
+      return html`<span aria-hidden="true">${iconOf(job.person.kind)}</span> Wish for <strong>${job.person.name}</strong>${job.to ? to(job.to.label) : ""}`;
+    case "agenda":
+      return html`<span aria-hidden="true">🗓️</span> Your day${to(job.to.label)}`;
+    case "event":
+      return html`<span aria-hidden="true">⏰</span> Reminder: <strong>${job.title}</strong>${to(job.to.label)}`;
+    default:
+      return html`Your reminder${to(job.to.label)}`;
+  }
 }
 
 /* What a row of Recent messages was. */
@@ -44,6 +53,10 @@ function recentTitle(d) {
       return "Your reminder";
     case "alert":
       return `Alert: ${alertSummary(d.text)}`;
+    case "agenda":
+      return "Your day";
+    case "event":
+      return `Reminder: ${d.title ?? "an event"}`;
     default:
       return `Preview of ${d.person_name ?? "a wish"}`;
   }
@@ -62,7 +75,7 @@ function recentResult(d) {
   }
 }
 
-export function todayPage({ today, settings, reminderLabel, alertLabel, wa, agenda, upcoming, recent, last, counts, journal, assets, flash }) {
+export function todayPage({ today, settings, reminderLabel, alertLabel, wa, agenda, upcoming, recent, last, counts, journal, yourDay, assets, flash }) {
   const todays = upcoming.filter((u) => u.inDays === 0).map((u) => u.person);
   const later = new Map();
   for (const u of upcoming.filter((u) => u.inDays > 0)) {
@@ -103,6 +116,8 @@ export function todayPage({ today, settings, reminderLabel, alertLabel, wa, agen
       </ol>
     </section>`}
 
+    ${yourDayCard({ date: today, ...yourDay })}
+
     ${journalCard({ date: today, page: journal })}
 
     <section class="card">
@@ -130,7 +145,7 @@ export function todayPage({ today, settings, reminderLabel, alertLabel, wa, agen
             : ""}
         </li>`,
           )}</ul>`
-        : html`<p class="empty">Nothing to send today — no birthdays${reminderLabel ? ", and nothing for the reminder to mention" : ""}.</p>`}
+        : html`<p class="empty">Nothing to send today — no birthdays, and nothing on the calendar${reminderLabel ? " or for the reminder to mention" : ""}.</p>`}
     </section>
   </div>
 </div>

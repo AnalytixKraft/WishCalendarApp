@@ -70,7 +70,7 @@ export function settingsPage({ values, errors = {}, timeZones, groups, wa, asset
 ${whatsappSection(wa)}
 <form method="post" action="/settings" class="card form" novalidate>
   <h2 class="settings-title">Messages</h2>
-  <label class="check check--big"><input type="checkbox" name="enabled" value="1"${values.enabled ? raw(" checked") : ""}> <span><strong>Send wishes and reminders automatically</strong><br><span class="hint">Ticked, each goes out at its time. Unticked, the app pauses: nothing goes out on its own — no wishes, reminders or alerts — until you tick it again. The Send now buttons work either way.</span></span></label>
+  <label class="check check--big"><input type="checkbox" name="enabled" value="1"${values.enabled ? raw(" checked") : ""}> <span><strong>Send wishes and reminders automatically</strong><br><span class="hint">Ticked, each goes out at its time. Unticked, the app pauses: nothing goes out on its own — no wishes, reminders, calendar messages or alerts — until you tick it again. The Send now buttons work either way.</span></span></label>
 
   <fieldset class="settings-group">
     <legend>Wishes</legend>
@@ -122,6 +122,16 @@ ${whatsappSection(wa)}
       </label>
     </div>
     <p class="hint">Before the wishes go out, the reminder lists every wish of the day — its time, where it goes, what it says — and the birthdays and anniversaries this many days ahead. “This WhatsApp” puts it in the linked phone’s own chat (Message yourself). Previews go to your number, or to the linked phone if you leave it empty.</p>
+  </fieldset>
+
+  <fieldset class="settings-group" id="calendar">
+    <legend>Calendar</legend>
+    <label class="field field--short">
+      <span class="field__label">Send my calendar messages to</span>
+      <select name="calendarTo"${invalid(errors.calendarTo)}>${sendToOptions(values.calendarTo, groups, { self: "This WhatsApp — the linked phone", direct: "My number (above)", none: "Nowhere — no calendar messages" })}</select>
+      ${error(errors.calendarTo)}
+    </label>
+    <p class="hint">At the reminder time, “Your day” lists the day’s events, the tasks due, and tomorrow’s events — on days that have any. An event with a reminder gets a message of its own at that time. They go apart from the wishes’ reminder; choose a group only if everyone in it may read them.</p>
   </fieldset>
 
   <fieldset class="settings-group" id="alerts">

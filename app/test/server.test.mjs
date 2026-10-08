@@ -428,3 +428,97 @@ test("a note about someone is on their page, and outlives them on the list", asy
   assert.match(page, /Likes jazz/);
   assert.doesNotMatch(page, /About <a href="\/people/);
 });
+
+test("the calendar: the month, a day in full, and Your day on Today", async () => {
+  const cookie = await signIn();
+  const today = isoDate(zonedNow(new Date(), db.settings.get().timezone));
+  const month = today.slice(0, 7);
+  const id = db.events.create({ title: "Calendar test event", day: today, time: "23:58", remind: 0 });
+  db.tasks.create({ title: "Calendar test task", due: today });
+  const page = await (await get("/calendar", cookie)).text();
+  assert.match(page, /<a href="\/calendar" aria-current="page">Calendar<\/a>/);
+  assert.match(page, /<main class="page page--wide">/);
+  assert.match(page, new RegExp(`<a class="cal__num" href="/calendar\\?month=${month}&amp;day=${today}"[^>]*aria-current="date"`));
+  assert.match(page, new RegExp(`<a href="/events/${id}">Calendar test event</a>`));
+  assert.match(page, /Calendar test task/);
+  assert.equal((await get("/calendar?month=2026-13", cookie)).status, 200, "a month that is not one shows this month");
+  assert.match(await (await get("/calendar?month=2027-02&day=2027-02-14", cookie)).text(), /Sunday 14 February 2027/);
+
+  const home = await (await get("/", cookie)).text();
+  assert.match(home, /<h2 id="your-day-title">Your day<\/h2>/);
+  assert.match(home, /23:58<\/span>\s*<span><a href="\/events\/\d+">Calendar test event<\/a> <span class="muted">· reminder at the time<\/span>/);
+  assert.match(home, /Reminder: <strong>Calendar test event<\/strong>/, "Today's messages list the reminder");
+  db.events.remove(id);
+});
+
+test("an event is checked before it is saved, and can be changed and deleted", async () => {
+  const cookie = await signIn();
+  const base = { title: "Dentist", day: "2026-11-03", endDay: "", time: "10:00", endTime: "10:45", repeat: "", repeatUntil: "", remind: "60", notes: "" };
+  const refused = async (fields, message) => {
+    const res = await post("/events", { ...base, ...fields }, { cookie });
+    assert.equal(res.status, 422, message.source);
+    assert.match(await res.text(), message);
+  };
+  await refused({ title: "" }, /Say what it is/);
+  await refused({ day: "2026-02-30" }, /Pick the day/);
+  await refused({ endDay: "2026-11-01" }, /before the day it starts/);
+  await refused({ endTime: "09:00" }, /not after it starts/);
+  await refused({ time: "", endTime: "" }, /An all-day event is in “Your day” on the morning itself/);
+  await refused({ repeat: "weekly", repeatUntil: "2026-10-01" }, /before the day it starts/);
+  await refused({ remind: "45" }, /Choose a reminder from the list/);
+
+  const created = await post("/events", base, { cookie });
+  assert.equal(created.status, 303);
+  assert.equal(created.headers.get("location"), "/calendar?month=2026-11&day=2026-11-03");
+  const event = db.events.between("2026-11-03", "2026-11-03").find((e) => e.title === "Dentist");
+  assert.deepEqual([event.time, event.endTime, event.remind, event.endDay, event.repeat], ["10:00", "10:45", 60, null, ""]);
+
+  const form = await (await get(`/events/${event.id}`, cookie)).text();
+  assert.match(form, /<option value="60" selected>1 hour before<\/option>/);
+  const trip = { ...base, title: "Trip", day: "2026-11-10", endDay: "2026-11-13", time: "", endTime: "", remind: "1440", repeat: "yearly" };
+  assert.equal((await post(`/events/${event.id}`, trip, { cookie })).status, 303);
+  assert.deepEqual([db.events.get(event.id).endDay, db.events.get(event.id).remind, db.events.get(event.id).repeat], ["2026-11-13", 1440, "yearly"]);
+
+  assert.equal((await post(`/events/${event.id}/delete`, {}, { cookie })).status, 303);
+  assert.equal(db.events.get(event.id), null);
+  assert.equal((await get(`/events/${event.id}`, cookie)).status, 404);
+});
+
+test("tasks: added, ticked, changed and deleted — and sent back only to the app's own pages", async () => {
+  const cookie = await signIn();
+  const flashOf = (res) => JSON.parse(Buffer.from(/bdr_flash=([^;]+)/.exec(res.headers.get("set-cookie"))[1], "base64url").toString()).text;
+  const added = await post("/tasks", { title: "Renew passport", due: "2026-11-20", back: "/calendar?month=2026-11&day=2026-11-20" }, { cookie });
+  assert.equal(added.headers.get("location"), "/calendar?month=2026-11&day=2026-11-20");
+  assert.match(flashOf(added), /Added “Renew passport” — due Fri 20 Nov/);
+  const task = db.tasks.open().find((t) => t.title === "Renew passport");
+
+  for (const back of ["https://example.com/", "//example.com", "/calendar?month=2026-11&next=//example.com", "/\\example.com"]) {
+    assert.equal((await post(`/tasks/${task.id}/done`, { done: "1", back }, { cookie })).headers.get("location"), "/calendar", back);
+  }
+  assert.equal(db.tasks.get(task.id).done, true);
+  assert.equal((await post(`/tasks/${task.id}/done`, { done: "0", back: "/" }, { cookie })).headers.get("location"), "/");
+  assert.equal(db.tasks.get(task.id).done, false);
+
+  assert.match(flashOf(await post("/tasks", { title: "  ", back: "/" }, { cookie })), /not added: Say what it is/);
+  assert.match(flashOf(await post("/tasks", { title: "Bad day", due: "2026-02-31", back: "/" }, { cookie })), /that due day is not a day/);
+
+  assert.equal((await post(`/tasks/${task.id}`, { title: "Renew passport", due: "", notes: "Photos first", done: "1" }, { cookie })).status, 303);
+  assert.deepEqual([db.tasks.get(task.id).due, db.tasks.get(task.id).notes, db.tasks.get(task.id).done], [null, "Photos first", true]);
+  assert.equal((await post(`/tasks/${task.id}/delete`, {}, { cookie })).status, 303);
+  assert.equal(db.tasks.get(task.id), null);
+});
+
+test("Settings: calendar messages go to the linked phone unless changed, apart from the wishes' reminder", async () => {
+  const cookie = await signIn();
+  const page = await (await get("/settings", cookie)).text();
+  assert.match(page, /<fieldset class="settings-group" id="calendar">/);
+  assert.match(page, /<select name="calendarTo"[^>]*><option value=""[^>]*>Nowhere — no calendar messages<\/option><option value="self" selected>/);
+  const base = { wishTime: "08:00", reminderTime: "07:00", timezone: "Asia/Kolkata", daysAhead: "1", countryCode: "91", template: "", reminderTo: "", myPhone: "", alertTo: "self" };
+  assert.equal((await post("/settings", base, { cookie })).status, 303);
+  assert.equal(db.settings.get().calendarTo, "self", "a page without the field keeps it");
+  const refused = await post("/settings", { ...base, calendarTo: "direct" }, { cookie });
+  assert.equal(refused.status, 422);
+  assert.equal((await post("/settings", { ...base, calendarTo: "" }, { cookie })).status, 303);
+  assert.equal(db.settings.get().calendarTo, "");
+  db.settings.save({ calendarTo: "self" });
+});

@@ -9,7 +9,13 @@
  *     time (or the wish time in Settings), to where its row on the People
  *     page says: a group, or their number.
  *
- * Each message has a key — reminder:<day>, wish:<day>:<person> — and a
+ * Then the calendar's, to where Settings says calendar messages go (the
+ * linked phone, unless changed): "Your day" at the reminder time — the day's
+ * events, the tasks due, tomorrow's events — when there is anything to say,
+ * and each event's reminder at its time.
+ *
+ * Each message has a key — reminder:<day>, wish:<day>:<person>,
+ * agenda:<day>, event:<event>:<the day it starts>:<minutes before> — and a
  * message whose key is marked sent is never sent again: not on the next
  * tick, not after a restart, not when someone presses Send now. If the
  * computer was asleep or off at the set time, the day's messages go out when
@@ -27,6 +33,7 @@
  * message, and go out once each. */
 
 import { BridgeError, CONNECTION_CODES, explain } from "./bridge.mjs";
+import { DAY_MINUTES, daysBetween, eventsOn, shiftDay, startsBetween } from "./calendar.mjs";
 import {
   addDays,
   formatShortDate,
@@ -39,7 +46,16 @@ import {
   upcomingBirthdays,
   zonedNow,
 } from "./dates.mjs";
-import { defaultTemplateFor, renderMissedAlert, renderRefusedAlert, renderReminder, renderTestAlert, renderWish } from "./messages.mjs";
+import {
+  defaultTemplateFor,
+  renderAgenda,
+  renderEventReminder,
+  renderMissedAlert,
+  renderRefusedAlert,
+  renderReminder,
+  renderTestAlert,
+  renderWish,
+} from "./messages.mjs";
 import { directJid, formatPhone, phoneOfJid } from "./phone.mjs";
 
 /* A send the person asked for that cannot happen, in words for them. */
@@ -90,9 +106,60 @@ function addedAfter(person, day, timeZone) {
   return Number.isFinite(at) && isoDate(zonedNow(new Date(at), timeZone)) > isoDate(day);
 }
 
-/* Today's messages: the reminder first, then the wishes by their time. A
- * wish whose person has no usable "Send to" is still listed, with to: null,
- * so the Today page and the reminder can say so; it is never sent. */
+const clockOf = (minutes) => `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+
+/* The calendar's messages on a day, to `to`: "Your day" at the reminder
+ * time, when it has anything to say, and the reminders whose time falls on
+ * this day — for an event that starts today, or up to a week from now. An
+ * all-day event's reminder goes at the reminder time, the days before it
+ * that it says. */
+function planCalendar(db, settings, date, to) {
+  if (!to) return [];
+  const day = isoDate(date);
+  const tomorrow = shiftDay(day, 1);
+  const events = db.events.between(day, shiftDay(day, 8));
+  const jobs = [];
+  const today = eventsOn(events, day);
+  const next = eventsOn(events, tomorrow).filter((o) => o.dayOf === 1);
+  const tasks = db.tasks.dueBy(day);
+  if (today.length || tasks.length || next.length) {
+    jobs.push({
+      key: `agenda:${day}`,
+      kind: "agenda",
+      day,
+      time: settings.reminderTime,
+      to,
+      person: null,
+      title: null,
+      text: renderAgenda({ date, today, tasks, tomorrow: next }),
+    });
+  }
+  const morning = parseTime(settings.reminderTime) ?? 0;
+  for (const event of events) {
+    if (event.remind === null) continue;
+    for (const start of startsBetween(event, day, shiftDay(day, Math.ceil(event.remind / DAY_MINUTES)))) {
+      const ahead = daysBetween(day, start) * DAY_MINUTES;
+      const at = event.time ? ahead + parseTime(event.time) - event.remind : ahead === event.remind ? morning : -1;
+      if (at < 0 || at >= DAY_MINUTES) continue;
+      jobs.push({
+        key: `event:${event.id}:${start}:${event.remind}`,
+        kind: "event",
+        day,
+        time: clockOf(at),
+        to,
+        person: null,
+        title: event.title,
+        text: renderEventReminder({ event, start, date }),
+      });
+    }
+  }
+  return jobs;
+}
+
+/* Today's messages: the reminder first, then the wishes and the calendar's
+ * messages by their time. A wish whose person has no usable "Send to" is
+ * still listed, with to: null, so the Today page and the reminder can say
+ * so; it is never sent. */
 export function planDay(db, settings, date, { linkedPhone = "" } = {}) {
   const day = isoDate(date);
   const people = db.people.active();
@@ -114,9 +181,14 @@ export function planDay(db, settings, date, { linkedPhone = "" } = {}) {
     })
     .sort((a, b) => parseTime(a.time) - parseTime(b.time) || a.person.name.localeCompare(b.person.name));
 
+  // Sorted by time alone: a wish and a calendar message at the same time
+  // keep this order, wishes first.
+  const calendar = planCalendar(db, settings, date, destinationOf(settings.calendarTo, settings.myPhone, groupNames, linkedPhone));
+  const messages = [...wishes, ...calendar].sort((a, b) => parseTime(a.time) - parseTime(b.time));
+
   const reminderTo = destinationOf(settings.reminderTo, settings.myPhone, groupNames, linkedPhone);
   const later = reminderTo ? upcomingBirthdays(people, date, settings.daysAhead).filter((u) => u.inDays > 0) : [];
-  if (!reminderTo || (!wishes.length && !later.length)) return wishes;
+  if (!reminderTo || (!wishes.length && !later.length)) return messages;
 
   const reminder = {
     key: `reminder:${day}`,
@@ -131,7 +203,7 @@ export function planDay(db, settings, date, { linkedPhone = "" } = {}) {
       later,
     }),
   };
-  return [reminder, ...wishes];
+  return [reminder, ...messages];
 }
 
 /* Whether a job with this delivery row should be tried now. */

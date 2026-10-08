@@ -127,6 +127,7 @@ export function settingsRoutes({ db, bridge, scheduler, log, assets, auth, throt
       // A Settings page opened before alerts existed has no such field: saving
       // it keeps them as they are, rather than turning them off.
       alertTo: form.has("alertTo") ? form.get("alertTo") : before.alertTo,
+      calendarTo: form.has("calendarTo") ? form.get("calendarTo") : before.calendarTo,
       countryCode: form.get("countryCode").replace(/^\+/, ""),
     };
     const errors = {};
@@ -143,6 +144,8 @@ export function settingsRoutes({ db, bridge, scheduler, log, assets, auth, throt
     if (reminderTo.error && !myPhone.error) errors.reminderTo = reminderTo.error;
     const alertTo = readSendTo(values.alertTo, myPhone.phone, { direct: "your", self: true });
     if (alertTo.error && !myPhone.error) errors.alertTo = alertTo.error;
+    const calendarTo = readSendTo(values.calendarTo, myPhone.phone, { direct: "your", self: true });
+    if (calendarTo.error && !myPhone.error) errors.calendarTo = calendarTo.error;
     if (Object.keys(errors).length) return renderSettings(ctx, { status: 422, values, errors });
 
     db.settings.save({
@@ -153,6 +156,7 @@ export function settingsRoutes({ db, bridge, scheduler, log, assets, auth, throt
       myPhone: myPhone.phone,
       reminderTo: reminderTo.sendTo,
       alertTo: alertTo.sendTo,
+      calendarTo: calendarTo.sendTo,
     });
     let text = "Settings saved.";
     if (values.enabled && !before.enabled) {

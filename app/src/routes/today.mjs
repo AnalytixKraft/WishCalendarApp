@@ -1,5 +1,6 @@
 /* Today, and its two buttons: send today's messages now, and retry one. */
 
+import { eventsOn } from "../calendar.mjs";
 import { isoDate, upcomingBirthdays } from "../dates.mjs";
 import { readForm } from "../http.mjs";
 import { destinationOf } from "../scheduler.mjs";
@@ -41,6 +42,7 @@ export function todayRoutes({ db, scheduler, assets, waStatus }) {
         last: scheduler.last,
         counts: { people: db.people.count(), unassigned: people.filter((p) => !p.sendTo).length },
         journal: db.journal.get(isoDate(date)),
+        yourDay: { events: eventsOn(db.events.between(isoDate(date), isoDate(date)), isoDate(date)), tasks: db.tasks.dueBy(isoDate(date)) },
         assets,
         flash: ctx.flash,
       }),

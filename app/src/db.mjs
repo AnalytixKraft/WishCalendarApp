@@ -176,6 +176,66 @@ const MIGRATIONS = [
     INSERT INTO notes_fts (rowid, title, body) VALUES (new.id, new.title, new.body);
   END;
   `,
+
+  // 7 — the calendar: events and tasks. Days are 'YYYY-MM-DD', times
+  // 'HH:MM' ('' for an event all day long). An event can last several days
+  // (end_day), repeat (calendar.mjs, startsBetween) and have one reminder,
+  // `remind` minutes before it starts. And two more kinds of message: an
+  // event's reminder, and "Your day" each morning — both to where Settings
+  // says calendar messages go. title is what a message was about, for the
+  // page: an event's title.
+  `
+  CREATE TABLE events (
+    id           INTEGER PRIMARY KEY,
+    title        TEXT    NOT NULL,
+    day          TEXT    NOT NULL CHECK (day GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+    end_day      TEXT    CHECK (end_day IS NULL OR (end_day GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' AND end_day > day)),
+    time         TEXT    NOT NULL DEFAULT '',
+    end_time     TEXT    NOT NULL DEFAULT '',
+    repeat       TEXT    NOT NULL DEFAULT '' CHECK (repeat IN ('', 'daily', 'weekly', 'monthly', 'yearly')),
+    repeat_until TEXT    CHECK (repeat_until IS NULL OR repeat_until GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+    remind       INTEGER CHECK (remind IS NULL OR remind >= 0),
+    notes        TEXT    NOT NULL DEFAULT '',
+    created_at   TEXT    NOT NULL DEFAULT (${NOW}),
+    updated_at   TEXT    NOT NULL DEFAULT (${NOW})
+  );
+  CREATE INDEX events_by_day ON events (day);
+
+  CREATE TABLE tasks (
+    id         INTEGER PRIMARY KEY,
+    title      TEXT    NOT NULL,
+    due        TEXT    CHECK (due IS NULL OR due GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+    notes      TEXT    NOT NULL DEFAULT '',
+    done_at    TEXT,
+    created_at TEXT    NOT NULL DEFAULT (${NOW}),
+    updated_at TEXT    NOT NULL DEFAULT (${NOW})
+  );
+
+  CREATE TABLE deliveries_7 (
+    key          TEXT    PRIMARY KEY,
+    day          TEXT    NOT NULL,
+    kind         TEXT    NOT NULL CHECK (kind IN ('wish', 'reminder', 'test', 'alert', 'event', 'agenda')),
+    person_id    INTEGER,
+    person_name  TEXT,
+    chat_id      TEXT    NOT NULL,
+    chat_subject TEXT    NOT NULL DEFAULT '',
+    status       TEXT    NOT NULL CHECK (status IN ('pending', 'sending', 'sent', 'failed')),
+    attempts     INTEGER NOT NULL DEFAULT 0,
+    message_id   TEXT,
+    error        TEXT,
+    created_at   TEXT    NOT NULL DEFAULT (${NOW}),
+    updated_at   TEXT    NOT NULL DEFAULT (${NOW}),
+    text         TEXT,
+    alerted_at   TEXT,
+    title        TEXT
+  );
+  INSERT INTO deliveries_7 (key, day, kind, person_id, person_name, chat_id, chat_subject, status, attempts, message_id, error, created_at, updated_at, text, alerted_at)
+    SELECT key, day, kind, person_id, person_name, chat_id, chat_subject, status, attempts, message_id, error, created_at, updated_at, text, alerted_at FROM deliveries;
+  DROP TABLE deliveries;
+  ALTER TABLE deliveries_7 RENAME TO deliveries;
+  CREATE INDEX deliveries_by_day ON deliveries (day);
+  CREATE INDEX deliveries_by_update ON deliveries (updated_at);
+  `,
 ];
 
 function migrate(db) {
@@ -212,6 +272,27 @@ const person = (r) =>
       }
     : null;
 const delivery = (r) => (r ? { ...r } : null);
+const event = (r) =>
+  r
+    ? {
+        id: r.id,
+        title: r.title,
+        day: r.day,
+        endDay: r.end_day,
+        time: r.time,
+        endTime: r.end_time,
+        repeat: r.repeat,
+        repeatUntil: r.repeat_until,
+        remind: r.remind,
+        notes: r.notes,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at,
+      }
+    : null;
+const task = (r) =>
+  r
+    ? { id: r.id, title: r.title, due: r.due, notes: r.notes, done: r.done_at !== null, doneAt: r.done_at, createdAt: r.created_at, updatedAt: r.updated_at }
+    : null;
 /* A note or a journal page. body is the whole text, from get(); a list has
  * the start of it as preview, and a search the matching part as snippet
  * (the words found between \u0001 and \u0002). */
@@ -324,6 +405,7 @@ export function openDb(file, { defaultTimezone = "Asia/Kolkata" } = {}) {
     anniversary_template: DEFAULT_ANNIVERSARY_TEMPLATE,
     reminder_to: "",
     alert_to: "self",
+    calendar_to: "self",
     my_phone: "",
     country_code: "91",
   };
@@ -342,11 +424,12 @@ export function openDb(file, { defaultTimezone = "Asia/Kolkata" } = {}) {
         anniversaryTemplate: values.anniversary_template,
         reminderTo: values.reminder_to, // '' (no reminder) | 'self' (the linked phone) | 'direct' (my number) | a group id
         alertTo: values.alert_to, // the same choices; '' is no alerts
+        calendarTo: values.calendar_to, // the same again: where "Your day" and event reminders go
         myPhone: values.my_phone,
         countryCode: values.country_code,
       };
     },
-    save({ enabled, wishTime, reminderTime, timezone, daysAhead, template, anniversaryTemplate, reminderTo, alertTo, myPhone, countryCode }) {
+    save({ enabled, wishTime, reminderTime, timezone, daysAhead, template, anniversaryTemplate, reminderTo, alertTo, calendarTo, myPhone, countryCode }) {
       const upsert = q("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value");
       const values = {
         enabled: enabled === undefined ? undefined : enabled ? "1" : "0",
@@ -358,6 +441,7 @@ export function openDb(file, { defaultTimezone = "Asia/Kolkata" } = {}) {
         anniversary_template: anniversaryTemplate,
         reminder_to: reminderTo,
         alert_to: alertTo,
+        calendar_to: calendarTo,
         my_phone: myPhone,
         country_code: countryCode,
       };
@@ -384,14 +468,15 @@ export function openDb(file, { defaultTimezone = "Asia/Kolkata" } = {}) {
     /* About to call the bridge: one more attempt, marked `sending` until the
      * answer is in. A row left `sending` means the app stopped mid-send. */
     /* chat_id / chat_subject: where it went — a group, or a number — and
-     * how the page names it. text is kept for an alert only (a new row). */
-    begin: ({ key, day, kind, person: p = null, to }, at, text = null) =>
+     * how the page names it. text is kept for an alert only (a new row);
+     * title, for a calendar message: what it was about. */
+    begin: ({ key, day, kind, person: p = null, to, title = null }, at, text = null) =>
       q(
-        `INSERT INTO deliveries (key, day, kind, person_id, person_name, chat_id, chat_subject, status, attempts, text, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'sending', 1, ?, ?, ?)
+        `INSERT INTO deliveries (key, day, kind, person_id, person_name, chat_id, chat_subject, status, attempts, text, title, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'sending', 1, ?, ?, ?, ?)
          ON CONFLICT (key) DO UPDATE SET status = 'sending', attempts = attempts + 1, error = NULL, chat_id = excluded.chat_id,
-           chat_subject = excluded.chat_subject, person_name = excluded.person_name, updated_at = excluded.updated_at`,
-      ).run(key, day, kind, p?.id ?? null, p?.name ?? null, to.id, to.label, text, at, at),
+           chat_subject = excluded.chat_subject, person_name = excluded.person_name, title = excluded.title, updated_at = excluded.updated_at`,
+      ).run(key, day, kind, p?.id ?? null, p?.name ?? null, to.id, to.label, text, title, at, at),
     succeed: (key, messageId, at) =>
       q("UPDATE deliveries SET status = 'sent', message_id = ?, error = NULL, updated_at = ? WHERE key = ?").run(
         messageId,
@@ -520,7 +605,60 @@ export function openDb(file, { defaultTimezone = "Asia/Kolkata" } = {}) {
         .all(limit)
         .map(note),
     count: () => q("SELECT COUNT(*) AS n FROM notes WHERE kind = 'journal'").get().n,
+    /* The days from `from` through `to` that have a page. */
+    daysBetween: (from, to) => q("SELECT day FROM notes WHERE kind = 'journal' AND day BETWEEN ? AND ? ORDER BY day").all(from, to).map((r) => r.day),
   };
 
-  return { people, chats, settings, password, deliveries, alerts, notes, journal, transaction, close: () => db.close() };
+  /* The calendar. Which days an event falls on is calendar.mjs's to say;
+   * these only keep them. */
+  const EVENT_FIELDS = "title = ?, day = ?, end_day = ?, time = ?, end_time = ?, repeat = ?, repeat_until = ?, remind = ?, notes = ?";
+  const eventValues = ({ title, day, endDay = null, time = "", endTime = "", repeat = "", repeatUntil = null, remind = null, notes = "" }) => [
+    title,
+    day,
+    endDay,
+    time,
+    endTime,
+    repeat,
+    repeat ? repeatUntil : null,
+    remind,
+    notes,
+  ];
+
+  const events = {
+    get: (id) => event(q("SELECT * FROM events WHERE id = ?").get(id)),
+    /* Every event that may fall on a day from `from` through `to`: one that
+     * starts by `to`, and repeats or lasts until `from` at least. */
+    between: (from, to) =>
+      q("SELECT * FROM events WHERE day <= ? AND (repeat <> '' OR COALESCE(end_day, day) >= ?) ORDER BY day, time, id").all(to, from).map(event),
+    count: () => q("SELECT COUNT(*) AS n FROM events").get().n,
+    create: (fields) =>
+      Number(
+        q("INSERT INTO events (title, day, end_day, time, end_time, repeat, repeat_until, remind, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+          ...eventValues(fields),
+        ).lastInsertRowid,
+      ),
+    update: (id, fields) => q(`UPDATE events SET ${EVENT_FIELDS}, updated_at = ${NOW} WHERE id = ?`).run(...eventValues(fields), id).changes > 0,
+    remove: (id) => q("DELETE FROM events WHERE id = ?").run(id).changes > 0,
+  };
+
+  const tasks = {
+    get: (id) => task(q("SELECT * FROM tasks WHERE id = ?").get(id)),
+    /* Not done yet: those with a due day first, soonest first; then the
+     * ones with none, oldest first. */
+    open: () => q("SELECT * FROM tasks WHERE done_at IS NULL ORDER BY due IS NULL, due, id").all().map(task),
+    /* Not done, and due on `day` or before it. */
+    dueBy: (day) => q("SELECT * FROM tasks WHERE done_at IS NULL AND due <= ? ORDER BY due, id").all(day).map(task),
+    /* Due from `from` through `to`, done or not — for the month. */
+    dueBetween: (from, to) => q("SELECT * FROM tasks WHERE due BETWEEN ? AND ? ORDER BY due, done_at IS NOT NULL, id").all(from, to).map(task),
+    /* The latest done. */
+    done: (limit = 10) => q("SELECT * FROM tasks WHERE done_at IS NOT NULL ORDER BY done_at DESC, id DESC LIMIT ?").all(limit).map(task),
+    create: ({ title, due = null, notes = "" }) => Number(q("INSERT INTO tasks (title, due, notes) VALUES (?, ?, ?)").run(title, due, notes).lastInsertRowid),
+    update: (id, { title, due = null, notes = "" }) =>
+      q(`UPDATE tasks SET title = ?, due = ?, notes = ?, updated_at = ${NOW} WHERE id = ?`).run(title, due, notes, id).changes > 0,
+    setDone: (id, done) =>
+      q(`UPDATE tasks SET done_at = ${done ? `COALESCE(done_at, ${NOW})` : "NULL"} WHERE id = ?`).run(id).changes > 0,
+    remove: (id) => q("DELETE FROM tasks WHERE id = ?").run(id).changes > 0,
+  };
+
+  return { people, chats, settings, password, deliveries, alerts, notes, journal, events, tasks, transaction, close: () => db.close() };
 }

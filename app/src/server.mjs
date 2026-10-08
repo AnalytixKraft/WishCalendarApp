@@ -24,6 +24,7 @@ import {
   sendJson,
   serializeCookie,
 } from "./http.mjs";
+import { calendarRoutes } from "./routes/calendar.mjs";
 import { notesRoutes } from "./routes/notes.mjs";
 import { peopleRoutes } from "./routes/people.mjs";
 import { settingsRoutes } from "./routes/settings.mjs";
@@ -145,7 +146,7 @@ export async function createApp({ config, problems = [], db, bridge, scheduler, 
   }
 
   const shared = { db, bridge, scheduler, log, assets, auth, throttle, waStatus, knownGroups };
-  const routes = [...todayRoutes(shared), ...notesRoutes(shared), ...peopleRoutes(shared), ...settingsRoutes(shared)];
+  const routes = [...todayRoutes(shared), ...calendarRoutes(shared), ...notesRoutes(shared), ...peopleRoutes(shared), ...settingsRoutes(shared)];
 
   function serveStatic(res, name, url) {
     const file = assets.files.get(name);

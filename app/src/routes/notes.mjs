@@ -1,22 +1,16 @@
 /* The notebook: notes (list, search, tags, a note's page, its form) and the
  * journal, a page a day. Nothing here sends anything. */
 
-import { addDays, formatShortDate, fromIsoDate, isBirthdayOn, isoDate } from "../dates.mjs";
+import { formatShortDate, isBirthdayOn, isoDate } from "../dates.mjs";
 import { HttpError, readForm, redirect } from "../http.mjs";
 import { IS_TAG, MAX_BODY, MAX_TITLE, normalizeTag, searchQuery } from "../notes.mjs";
 import { journalPage, noteFormPage, notePage, notesPage } from "../views/notes.mjs";
+import { readDay } from "./forms.mjs";
 
 const LIST_LIMIT = 200;
 /* A note posts its whole text: 100 000 characters, at up to 4 bytes each,
  * percent-encoded. */
 const MAX_FORM = 1_500_000;
-
-/* 'YYYY-MM-DD' that is a real day → {year, month, day}; else null. */
-function readDay(value) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
-  const date = fromIsoDate(value);
-  return date.year >= 1900 && date.year <= 2100 && isoDate(addDays(date, 0)) === value ? date : null;
-}
 
 const readText = (form, name) => form.raw(name).replace(/\r\n?/g, "\n").replace(/^\s*\n/, "").trimEnd();
 
